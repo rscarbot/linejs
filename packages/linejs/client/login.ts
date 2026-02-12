@@ -44,6 +44,8 @@ const createBaseClient = (init: InitOptions) =>
 		fetch: init.fetch,
 		device: init.device,
 		storage: init.storage,
+		version: init.version,
+		endpoint: init.endpoint,
 	});
 
 export interface WithQROptions {

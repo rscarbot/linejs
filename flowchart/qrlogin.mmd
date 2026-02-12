@@ -1,0 +1,28 @@
+graph TD
+    Start[Start demo_ipad_login.ts] --> Init[Initialize BaseClient device:IOSIPAD]
+    Init --> Register[Register qrcall & pincall listeners]
+    Register --> WithQR[Call loginProcess.withQrCode]
+    
+    subgraph "withQrCode Flow"
+        WithQR --> CreateSession[createSession /acct/lgn/sq/v1]
+        CreateSession --> CreateQR[createQrCode /acct/lgn/sq/v1]
+        CreateQR --> SqrSecret[Generate E2EE SqrSecret]
+        SqrSecret --> EmitQR[Emit qrcall URL + secret]
+        EmitQR --> PollQR[Poll checkQrCodeVerified /acct/lp/lgn/sq/v1]
+        PollQR --> Scanned{User Scanned QR?}
+        Scanned -- No --> PollQR
+        Scanned -- Yes --> VerifyCert[verifyCertificate /acct/lgn/sq/v1]
+        VerifyCert -- Fail/No Cert --> CreatePin[createPinCode /acct/lgn/sq/v1]
+        CreatePin --> EmitPin[Emit pincall PINCODE]
+        EmitPin --> PollPin[Poll checkPinCodeVerified /acct/lp/lgn/sq/v1]
+        PollPin --> Authorized{User entered PIN?}
+        Authorized -- No --> PollPin
+        Authorized -- Yes --> QRLogin
+        VerifyCert -- Success --> QRLogin[qrCodeLogin /acct/lgn/sq/v1]
+        QRLogin --> Result[Return AuthToken]
+    end
+    
+    Result --> Ready[Call loginProcess.ready]
+    Ready --> Profile[talk.getProfile /S4]
+    Profile --> LoggedIn[Display Successfully logged in!]
+    LoggedIn --> Exit[End]
