@@ -102,14 +102,52 @@ impl TalkService {
 
         // Pb1_C13097n4 field 2 = keyId (i32), field 4 = keyData (binary as base64 string)
         let key_id = pub_key_struct.get("2").and_then(|v| v.as_i64()).unwrap_or(0);
-        let key_data_b64 = pub_key_struct.get("4").and_then(|v| v.as_str())
+        let key_data_str = pub_key_struct.get("4").and_then(|v| v.as_str())
             .ok_or_else(|| ServiceError::Failed("No keyData in negotiate result".to_string()))?;
 
-        let key_data = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD, key_data_b64
-        ).map_err(|e| ServiceError::Failed(format!("decode keyData: {}", e)))?;
+        // Thrift reader stores valid-UTF-8 binary as plain strings, non-UTF-8 as base64.
+        // Try base64 decode first; if it fails, the string IS the raw UTF-8 bytes.
+        let key_data = match base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD, key_data_str
+        ) {
+            Ok(bytes) => bytes,
+            Err(_) => key_data_str.as_bytes().to_vec(),
+        };
 
         Ok((key_id, key_data))
+    }
+
+    pub async fn get_profile(&self) -> Result<serde_json::Value, ServiceError> {
+        let mut body = vec![0x82, 0x21, 0x00, 0x0a];
+        body.extend_from_slice(b"getProfile");
+        {
+            let mut proto = CompactProtocol::new(None::<Cursor<&[u8]>>, Some(&mut body));
+            proto.write_struct_begin()?;
+            proto.write_field_stop()?;
+            proto.write_struct_end()?;
+        }
+        body.push(0x00);
+
+        let res = self.client.post_thrift("/S4", body, None).await?;
+        let bytes = res.bytes().await?;
+
+        if bytes.is_empty() {
+             return Err(ServiceError::Failed("Empty getProfile response".to_string()));
+        }
+
+        let mut proto = CompactProtocol::new(Some(Cursor::new(&bytes)), None::<&mut Vec<u8>>);
+        let (_name, message_type, _seq) = proto.read_message_begin()?;
+        if message_type == 3 {
+            let val = proto.read_struct_to_value()?;
+            let msg = val.get("1").and_then(|v| v.as_str()).unwrap_or("getProfile exception");
+            return Err(ServiceError::Failed(msg.to_string()));
+        }
+
+        let val = proto.read_struct_to_value()?;
+        let success = val.get("0")
+            .ok_or_else(|| ServiceError::Failed("No result in getProfile".to_string()))?;
+        
+        Ok(success.clone())
     }
 
     // Build the sync Thrift request body matching TypeScript's sync_args structure:
@@ -163,6 +201,11 @@ impl TalkService {
         if bytes.is_empty() {
             return Ok(vec![]);
         }
+
+        // Log response bytes for diagnostic (truncated to first 500 bytes)
+        let display_len = bytes.len().min(500);
+        println!("[DEBUG] Response {} bytes (showing first {}): {}",
+            bytes.len(), display_len, hex::encode(&bytes[..display_len]));
 
         let mut proto = CompactProtocol::new(Some(Cursor::new(&bytes)), None::<&mut Vec<u8>>);
         let (_name, message_type, _seq) = proto.read_message_begin()?;

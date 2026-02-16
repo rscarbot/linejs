@@ -5,3 +5,4 @@ pub mod thrift;
 pub mod e2ee;
 pub mod login;
 pub mod service;
+pub mod storage;

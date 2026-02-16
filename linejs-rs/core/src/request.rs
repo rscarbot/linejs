@@ -39,9 +39,20 @@ impl RequestClient {
     // Post a thrift request with a custom timeout duration for long-polling endpoints
     pub async fn post_thrift_with_timeout(&self, path: &str, body: Vec<u8>, extra_headers: Option<HashMap<String, String>>, timeout: Option<std::time::Duration>) -> Result<Response, RequestError> {
         println!("[DEBUG] Request {} bytes: {}", path, hex::encode(&body));
-        let url = format!("https://{}{}", self.endpoint, path);
+        let url = if self.endpoint.starts_with("http") {
+            format!("{}{}", self.endpoint, path)
+        } else {
+            format!("https://{}{}", self.endpoint, path)
+        };
         let mut headers = header::HeaderMap::new();
-        headers.insert(header::HOST, header::HeaderValue::from_str(&self.endpoint).unwrap());
+        let host = if self.endpoint.starts_with("http") {
+            // Extract host from URL for proxy mode
+            self.endpoint.split("//").nth(1).unwrap_or(&self.endpoint)
+                .split('/').next().unwrap_or(&self.endpoint).to_string()
+        } else {
+            self.endpoint.clone()
+        };
+        headers.insert(header::HOST, header::HeaderValue::from_str(&host).unwrap());
         headers.insert(header::ACCEPT, header::HeaderValue::from_static("application/x-thrift"));
         headers.insert(header::CONTENT_TYPE, header::HeaderValue::from_static("application/x-thrift"));
         headers.insert(header::USER_AGENT, header::HeaderValue::from_str(&self.device_details.user_agent()).unwrap());

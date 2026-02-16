@@ -1,0 +1,769 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#06C755">
+  <meta name="description" content="LINE Messaging Client powered by Rust + WebAssembly">
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon"
+    href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💬</text></svg>">
+  <title>LINEJS WASM</title>
+  <style>
+    :root {
+      --line-green: #06C755;
+      --line-green-dark: #05a648;
+      --bg: #f5f5f5;
+      --card-bg: #ffffff;
+      --text: #111827;
+      --text-muted: #6b7280;
+      --border: #e5e7eb;
+      --msg-self: #06C755;
+      --msg-peer: #ffffff;
+      --danger: #ef4444;
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* Header */
+    .header {
+      background: var(--line-green);
+      color: white;
+      padding: 14px 20px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+      z-index: 10;
+    }
+
+    .header h1 {
+      font-size: 18px;
+      font-weight: 600;
+    }
+
+    .header .badge {
+      font-size: 11px;
+      background: rgba(255, 255, 255, 0.25);
+      padding: 2px 8px;
+      border-radius: 10px;
+    }
+
+    .header .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #fbbf24;
+      margin-left: auto;
+    }
+
+    .header .status-dot.online {
+      background: #ffffff;
+    }
+
+    /* Main content */
+    .container {
+      flex: 1;
+      min-height: 0;
+      max-width: 480px;
+      width: 100%;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* Screens */
+    .screen {
+      display: none;
+      flex: 1;
+      flex-direction: column;
+      min-height: 0;
+    }
+
+    .screen.active {
+      display: flex;
+    }
+
+    /* Login Screen */
+    #login-screen {
+      align-items: center;
+      justify-content: center;
+      padding: 30px 20px;
+      gap: 24px;
+    }
+
+    .login-logo {
+      font-size: 64px;
+      line-height: 1;
+    }
+
+    .login-title {
+      font-size: 22px;
+      font-weight: 700;
+      text-align: center;
+    }
+
+    .login-desc {
+      color: var(--text-muted);
+      text-align: center;
+      font-size: 14px;
+      max-width: 300px;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 12px 32px;
+      border: none;
+      border-radius: 24px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      min-width: 200px;
+    }
+
+    .btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .btn-primary {
+      background: var(--line-green);
+      color: white;
+    }
+
+    .btn-primary:hover:not(:disabled) {
+      background: var(--line-green-dark);
+      transform: translateY(-1px);
+      box-shadow: 0 4px 12px rgba(6, 199, 85, 0.3);
+    }
+
+    /* QR Screen */
+    #qr-screen {
+      align-items: center;
+      padding: 30px 20px;
+      gap: 20px;
+    }
+
+    .qr-container {
+      background: white;
+      padding: 16px;
+      border-radius: 16px;
+      box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+    }
+
+    .qr-container img {
+      width: 240px;
+      height: 240px;
+      display: block;
+    }
+
+    .qr-label {
+      font-size: 15px;
+      font-weight: 600;
+      text-align: center;
+    }
+
+    .qr-sublabel {
+      color: var(--text-muted);
+      font-size: 13px;
+      text-align: center;
+    }
+
+    /* PIN Screen */
+    #pin-screen {
+      align-items: center;
+      justify-content: center;
+      padding: 30px 20px;
+      gap: 20px;
+    }
+
+    .pin-display {
+      font-size: 48px;
+      font-weight: 800;
+      letter-spacing: 12px;
+      color: var(--line-green);
+      background: white;
+      padding: 20px 40px;
+      border-radius: 16px;
+      box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+    }
+
+    /* Chat Screen */
+    #chat-screen {
+      padding: 0;
+      overflow: hidden;
+    }
+
+    .messages-container {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      background: #8CABD9;
+      background-image: linear-gradient(135deg, #8CABD9 0%, #7B9ECF 100%);
+    }
+
+    .message {
+      max-width: 75%;
+      padding: 10px 14px;
+      border-radius: 18px;
+      font-size: 14px;
+      line-height: 1.45;
+      word-break: break-word;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+    }
+
+    .message.received {
+      align-self: flex-start;
+      background: var(--msg-peer);
+      color: var(--text);
+      border-bottom-left-radius: 4px;
+    }
+
+    .message.sent {
+      align-self: flex-end;
+      background: var(--msg-self);
+      color: white;
+      border-bottom-right-radius: 4px;
+    }
+
+    .message .meta {
+      font-size: 11px;
+      opacity: 0.65;
+      margin-top: 4px;
+    }
+
+    .message.system {
+      align-self: center;
+      background: rgba(0, 0, 0, 0.2);
+      color: white;
+      font-size: 12px;
+      padding: 6px 14px;
+      border-radius: 12px;
+      max-width: 90%;
+    }
+
+    /* Spinner */
+    .spinner {
+      width: 24px;
+      height: 24px;
+      border: 3px solid rgba(0, 0, 0, 0.1);
+      border-top-color: var(--line-green);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      margin: 0 auto;
+    }
+
+    .spinner.white {
+      border-color: rgba(255, 255, 255, 0.3);
+      border-top-color: white;
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
+    /* Status bar at bottom */
+    .status-bar {
+      padding: 8px 16px;
+      font-size: 12px;
+      color: var(--text-muted);
+      background: var(--card-bg);
+      border-top: 1px solid var(--border);
+      text-align: center;
+    }
+
+    /* Log panel */
+    .log-toggle {
+      position: fixed;
+      bottom: 12px;
+      right: 12px;
+      background: #1f2937;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      padding: 6px 12px;
+      font-size: 11px;
+      cursor: pointer;
+      z-index: 100;
+      opacity: 0.7;
+    }
+
+    .log-toggle:hover {
+      opacity: 1;
+    }
+
+    .log-panel {
+      display: none;
+      position: fixed;
+      bottom: 44px;
+      right: 12px;
+      width: 360px;
+      max-height: 300px;
+      background: #1f2937;
+      color: #d1d5db;
+      border-radius: 8px;
+      overflow-y: auto;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 11px;
+      padding: 10px;
+      z-index: 100;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+    }
+
+    .log-panel.open {
+      display: block;
+    }
+
+    .log-entry {
+      padding: 2px 0;
+      border-bottom: 1px solid #374151;
+    }
+
+    .log-entry.error {
+      color: #f87171;
+    }
+
+    .log-entry.success {
+      color: #34d399;
+    }
+
+    @media (max-width: 480px) {
+      .container {
+        max-width: 100%;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <div class="header">
+    <span style="font-size: 22px;">💬</span>
+    <h1>LINEJS</h1>
+    <span class="badge">WASM + Rust</span>
+    <div class="status-dot" id="status-dot"></div>
+    <button id="btn-logout" onclick="doLogout()"
+      style="display:none; background:none; border:none; color:white; font-size:20px; cursor:pointer; margin-left:8px;"
+      title="Logout">🚪</button>
+  </div>
+
+  <div class="container">
+    <!-- Login Screen -->
+    <div class="screen active" id="login-screen">
+      <div class="login-logo">🔐</div>
+      <div class="login-title">LINE Messenger</div>
+      <div class="login-desc">
+        End-to-end encrypted messaging powered by Rust and WebAssembly.
+        Login with your LINE account via QR code.
+      </div>
+
+      <div class="device-selector"
+        style="margin-bottom: 20px; display: flex; gap: 10px; align-items: center; justify-content: center;">
+        <label for="device-mode" style="font-size: 14px; font-weight: 600;">Device Mode:</label>
+        <select id="device-mode"
+          style="padding: 8px; border-radius: 8px; border: 1px solid #ddd; background: #f5f5f5; font-size: 14px;">
+          <option value="ipad" selected>iPad (Default)</option>
+          <option value="desktop">PC (Windows)</option>
+        </select>
+      </div>
+
+      <button class="btn btn-primary" id="btn-login" onclick="startLogin()">
+        Login with QR Code
+      </button>
+    </div>
+
+    <!-- QR Code Screen -->
+    <div class="screen" id="qr-screen">
+      <div class="qr-label">Scan QR Code</div>
+      <div class="qr-sublabel">Open LINE on your phone and scan this code</div>
+      <div class="qr-container">
+        <img id="qr-image" alt="QR Code" />
+      </div>
+      <div class="spinner" id="qr-spinner" style="display:none;"></div>
+      <div class="qr-sublabel" id="qr-status">Waiting for scan...</div>
+    </div>
+
+    <!-- PIN Screen -->
+    <div class="screen" id="pin-screen">
+      <div style="font-size: 40px;">📱</div>
+      <div class="qr-label">Enter PIN Code</div>
+      <div class="qr-sublabel">Enter this code on your mobile device</div>
+      <div class="pin-display" id="pin-display">------</div>
+      <div class="spinner" id="pin-spinner"></div>
+      <div class="qr-sublabel" id="pin-status">Waiting for verification...</div>
+    </div>
+
+    <!-- Chat Screen -->
+    <div class="screen" id="chat-screen">
+      <div class="messages-container" id="messages-container">
+        <div class="message system">Waiting for messages...</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="status-bar" id="status-bar">Initializing WASM runtime...</div>
+
+  <button class="log-toggle" onclick="toggleLog()">Console</button>
+  <div class="log-panel" id="log-panel"></div>
+
+  <script type="module">
+    import init, { LineClient } from './pkg/linejs_wasm.js';
+
+    let client = null;
+    let pollInterval = null;
+
+    // Expose functions to global scope for onclick handlers
+    window.startLogin = startLogin;
+    window.toggleLog = toggleLog;
+    window.doLogout = doLogout;
+
+    function doLogout() {
+      localStorage.removeItem('linejs_credentials');
+      setOnline(false);
+      document.getElementById('btn-logout').style.display = 'none';
+      document.getElementById('btn-login').disabled = false;
+      document.getElementById('btn-login').textContent = 'Login with QR Code';
+      document.getElementById('messages-container').innerHTML = '<div class="message system">Waiting for messages...</div>';
+      showScreen('login-screen');
+      setStatus('Logged out. Ready to login');
+      log('Logged out, credentials cleared', 'success');
+      // Re-create client to clear internal state
+      client = new LineClient();
+    }
+
+    function log(msg, type = '') {
+      const panel = document.getElementById('log-panel');
+      const entry = document.createElement('div');
+      entry.className = 'log-entry ' + type;
+      entry.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      panel.appendChild(entry);
+      panel.scrollTop = panel.scrollHeight;
+      console.log(`[LINEJS] ${msg}`);
+    }
+
+    function toggleLog() {
+      document.getElementById('log-panel').classList.toggle('open');
+    }
+
+    function showScreen(id) {
+      document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+      document.getElementById(id).classList.add('active');
+    }
+
+    function setStatus(msg) {
+      document.getElementById('status-bar').textContent = msg;
+    }
+
+    function setOnline(online) {
+      const dot = document.getElementById('status-dot');
+      dot.classList.toggle('online', online);
+    }
+
+    const CRED_KEY = 'linejs_credentials';
+
+    // Initialize WASM and attempt auto-login from saved credentials
+    async function initWasm() {
+      try {
+        await init();
+        client = new LineClient();
+        log('WASM runtime initialized', 'success');
+
+        // Try auto-login from saved credentials
+        const saved = localStorage.getItem(CRED_KEY);
+        if (saved) {
+          try {
+            client.loginWithToken(saved);
+            log('Session restored from saved credentials', 'success');
+            setStatus('Logged in - Listening for messages');
+            setOnline(true);
+            document.getElementById('btn-logout').style.display = '';
+            showScreen('chat-screen');
+            addSystemMessage('Session restored. Listening for messages...');
+            startMessagePolling();
+            return;
+          } catch (e) {
+            log('Auto-login failed (token may be expired): ' + e, 'error');
+            localStorage.removeItem(CRED_KEY);
+            // Fall through to show login screen
+          }
+        }
+
+        setStatus('Ready to login');
+      } catch (e) {
+        setStatus('Failed to initialize WASM');
+        log('WASM init error: ' + e, 'error');
+      }
+    }
+
+    async function startLogin() {
+      if (!client) return;
+
+      const deviceMode = document.getElementById('device-mode').value;
+      if (client.setDevice) {
+        client.setDevice(deviceMode);
+        log('Set device mode to: ' + deviceMode);
+      } else {
+        log('setDevice method not found on client', 'warn');
+      }
+
+      const btn = document.getElementById('btn-login');
+      btn.disabled = true;
+      btn.textContent = 'Connecting...';
+      setStatus('Creating login session...');
+      log('Starting QR login flow...');
+
+      try {
+        const resultStr = await client.createQrLogin();
+        const result = JSON.parse(resultStr);
+        log('QR code generated', 'success');
+
+        // Show QR screen
+        showScreen('qr-screen');
+        document.getElementById('qr-image').src = result.qrImageUrl;
+        setStatus('Scan the QR code with LINE app');
+
+        // Poll for QR verification
+        pollQrVerification();
+      } catch (e) {
+        log('Login error: ' + e, 'error');
+        setStatus('Login failed: ' + e);
+        btn.disabled = false;
+        btn.textContent = 'Login with QR Code';
+      }
+    }
+
+    async function pollQrVerification() {
+      log('Waiting for QR scan...');
+      document.getElementById('qr-status').textContent = 'Waiting for scan...';
+
+      try {
+        const verified = await client.checkQrCodeVerified();
+        if (verified) {
+          log('QR code scanned!', 'success');
+          document.getElementById('qr-status').textContent = 'Scanned!';
+          setStatus('QR code scanned, verifying...');
+          await handlePostScan();
+        } else {
+          log('QR poll timeout, retrying...');
+          // Retry
+          pollQrVerification();
+        }
+      } catch (e) {
+        log('QR verification error: ' + e, 'error');
+        setStatus('QR verification error');
+      }
+    }
+
+    async function handlePostScan() {
+      // Try certificate verification first
+      try {
+        const certOk = await client.verifyCertificate();
+        if (certOk) {
+          log('Certificate verified, skipping PIN', 'success');
+          await completeLogin();
+          return;
+        }
+      } catch (e) {
+        log('Certificate check: ' + e);
+      }
+
+      // Need PIN code
+      try {
+        const pin = await client.createPinCode();
+        log('PIN code: ' + pin, 'success');
+        showScreen('pin-screen');
+        document.getElementById('pin-display').textContent = pin;
+        setStatus('Enter PIN on your mobile device');
+
+        pollPinVerification();
+      } catch (e) {
+        log('PIN creation error: ' + e, 'error');
+        setStatus('PIN creation failed');
+      }
+    }
+
+    async function pollPinVerification() {
+      log('Waiting for PIN verification...');
+      try {
+        const verified = await client.checkPinCodeVerified();
+        if (verified) {
+          log('PIN verified!', 'success');
+          setStatus('PIN verified, logging in...');
+          await completeLogin();
+        } else {
+          log('PIN poll timeout, retrying...');
+          pollPinVerification();
+        }
+      } catch (e) {
+        log('PIN verification error: ' + e, 'error');
+        setStatus('PIN verification error');
+      }
+    }
+
+    async function completeLogin() {
+      try {
+        const token = await client.qrCodeLogin();
+        log('Login successful! Token: ' + token.substring(0, 20) + '...', 'success');
+
+        // Save credentials to localStorage for next visit
+        const creds = client.exportCredentials();
+        if (creds) {
+          localStorage.setItem(CRED_KEY, creds);
+          log('Credentials saved to localStorage', 'success');
+        }
+
+        setStatus('Logged in - Listening for messages');
+        setOnline(true);
+        document.getElementById('btn-logout').style.display = '';
+
+        showScreen('chat-screen');
+        addSystemMessage('Connected! Listening for messages...');
+
+        // Start message polling
+        startMessagePolling();
+      } catch (e) {
+        log('Login completion error: ' + e, 'error');
+        setStatus('Login failed: ' + e);
+      }
+    }
+
+    function startMessagePolling() {
+      let pollCount = 0;
+      let backoff = 200;
+
+      async function poll() {
+        try {
+          const resultStr = await client.pollMessages();
+          const messages = JSON.parse(resultStr);
+
+          // Reset backoff on success
+          backoff = 200;
+
+          for (const msg of messages) {
+            addChatMessage(msg.text, msg.isSend, msg.from, msg.to);
+            log(`Message: [From:${msg.from}] [To:${msg.to}] ${msg.text}`);
+          }
+
+          // Re-save credentials every 10 polls to persist newly discovered peer keys
+          pollCount++;
+          if (pollCount % 10 === 0) {
+            const creds = client.exportCredentials();
+            if (creds) {
+              localStorage.setItem(CRED_KEY, creds);
+            }
+          }
+
+          setOnline(true);
+          setStatus('Logged in - Listening for messages');
+        } catch (e) {
+          const errStr = String(e);
+          log('Poll error: ' + errStr, 'error');
+
+          // Detect token expiry / auth errors → clear credentials and revert to login
+          if (errStr.includes('AUTHENTICATION_DIVESTED_BY_OTHER_DEVICE') ||
+            errStr.includes('NOT_AUTHORIZED') ||
+            errStr.includes('AUTHENTICATION_FAILED')) {
+            log('Session expired, clearing credentials', 'error');
+            localStorage.removeItem(CRED_KEY);
+            setOnline(false);
+            document.getElementById('btn-logout').style.display = 'none';
+            document.getElementById('btn-login').disabled = false;
+            document.getElementById('btn-login').textContent = 'Login with QR Code';
+            showScreen('login-screen');
+            setStatus('Session expired. Please login again');
+            addSystemMessage('Session expired. Please login again.');
+            return; // Stop polling
+          }
+
+          // Network / proxy errors → keep credentials, back off and retry
+          setOnline(false);
+          setStatus('Offline - Retrying in ' + Math.round(backoff / 1000) + 's...');
+          backoff = Math.min(backoff * 2, 30000); // Max 30s backoff
+        }
+
+        setTimeout(poll, backoff);
+      }
+
+      poll();
+    }
+
+    function isAtBottom(container) {
+      return container.scrollHeight - container.scrollTop - container.clientHeight < 50;
+    }
+
+    function addSystemMessage(text) {
+      const container = document.getElementById('messages-container');
+      const div = document.createElement('div');
+      div.className = 'message system';
+      div.textContent = text;
+      container.appendChild(div);
+      // Always scroll to bottom for system messages (e.g. first login)
+      container.scrollTop = container.scrollHeight;
+    }
+
+    function addChatMessage(text, isSend, from, to) {
+      const container = document.getElementById('messages-container');
+      // Check if user is at bottom BEFORE appending
+      const shouldScroll = isAtBottom(container);
+
+      const div = document.createElement('div');
+      div.className = 'message ' + (isSend ? 'sent' : 'received');
+
+      const textNode = document.createElement('div');
+      textNode.textContent = text;
+      div.appendChild(textNode);
+
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      // Display full MIDs for debugging
+      meta.textContent = (isSend ? 'You' : '') +
+        ' [From: ' + from + ']' +
+        (to ? ' [To: ' + to + ']' : '') +
+        ' · ' + new Date().toLocaleTimeString();
+      div.appendChild(meta);
+
+      container.appendChild(div);
+      // Only auto-scroll if user was already at the bottom
+      if (shouldScroll) {
+        container.scrollTop = container.scrollHeight;
+      }
+    }
+
+    // Install service worker for PWA
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('sw.js').then(() => {
+        log('Service worker registered');
+      }).catch(e => {
+        log('SW registration failed: ' + e);
+      });
+    }
+
+    // Boot
+    initWasm();
+  </script>
+</body>
+
+</html>

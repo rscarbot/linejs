@@ -188,7 +188,7 @@ impl<R: Read, W: Write> CompactProtocol<R, W> {
             TType::I64 => Ok(serde_json::Value::Number(self.read_i64()?.into())),
             TType::Double => {
                 let mut buf = [0u8; 8]; self.reader.as_mut().unwrap().read_exact(&mut buf)?;
-                Ok(serde_json::json!(f64::from_be_bytes(buf)))
+                Ok(serde_json::json!(f64::from_le_bytes(buf)))
             },
             TType::String => {
                 let bin = self.read_binary()?;
@@ -204,7 +204,14 @@ impl<R: Read, W: Write> CompactProtocol<R, W> {
                     let b = self.read_byte()?;
                     let ktype = TType::from_compact((b >> 4) & 0x0f);
                     let vtype = TType::from_compact(b & 0x0f);
-                    for _ in 0..size { map.insert(self.read_value(ktype)?.to_string(), self.read_value(vtype)?); }
+                    for _ in 0..size {
+                        let key_val = self.read_value(ktype)?;
+                        let key_str = match key_val.as_str() {
+                            Some(s) => s.to_string(),
+                            None => key_val.to_string(),
+                        };
+                        map.insert(key_str, self.read_value(vtype)?);
+                    }
                 }
                 Ok(serde_json::Value::Object(map))
             },

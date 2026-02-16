@@ -164,6 +164,73 @@ impl E2EE {
         aad
     }
 
+    // Decrypt E2EE message V1 (AES-256-CBC).
+    // chunks: [salt, ciphertext, sign, senderKeyId, receiverKeyId(optional)]
+    pub fn decrypt_e2ee_message_v1(
+        chunks: &[Vec<u8>],
+        priv_key: &[u8],
+        pub_key: &[u8],
+    ) -> Result<serde_json::Value, String> {
+        if chunks.len() < 3 {
+            return Err(format!("E2EE V1: expected at least 3 chunks, got {}", chunks.len()));
+        }
+
+        let salt = &chunks[0];
+        let message = &chunks[1];
+        let _sign = &chunks[2]; // not used in V1 decryption
+
+        // X25519 shared secret
+        let shared_secret = Self::generate_shared_secret(priv_key, pub_key);
+
+        // Derive AES key and IV (matches TS: getSHA256Sum + xor for IV)
+        let aes_key = Self::sha256_sum(&[&shared_secret, salt, b"Key"]);
+        let aes_iv_full = Self::sha256_sum(&[&shared_secret, salt, b"IV"]);
+        let aes_iv = Self::xor(&aes_iv_full);
+
+        println!("DEBUG E2EE V1: salt_len={} msg_len={} aesKey[..8]={:02x?} aesIv[..8]={:02x?}",
+            salt.len(), message.len(),
+            &aes_key[..8.min(aes_key.len())],
+            &aes_iv[..8.min(aes_iv.len())]);
+
+        // Try AES-256-CBC with PKCS7 padding first, fall back to no padding
+        let plaintext = match Self::decrypt_aes_cbc_pkcs7(&aes_key, &aes_iv, message) {
+            Ok(pt) => pt,
+            Err(_) => Self::decrypt_aes_cbc(&aes_key, &aes_iv, message)?,
+        };
+
+        let json_str = String::from_utf8(plaintext.clone())
+            .or_else(|_| {
+                // Try trimming trailing null/padding bytes
+                let trimmed = plaintext.iter()
+                    .rposition(|&b| b != 0 && b > 0x1f)
+                    .map(|pos| &plaintext[..=pos])
+                    .unwrap_or(&plaintext);
+                String::from_utf8(trimmed.to_vec())
+            })
+            .map_err(|e| format!("E2EE V1 plaintext not UTF-8: {}", e))?;
+
+        let parsed: serde_json::Value = serde_json::from_str(&json_str)
+            .map_err(|e| format!("E2EE V1 JSON parse: {}", e))?;
+        Ok(parsed)
+    }
+
+    // AES-256-CBC with PKCS7 padding (default Node.js behavior)
+    fn decrypt_aes_cbc_pkcs7(key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>, String> {
+        type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
+        let mut buf = data.to_vec();
+
+        if buf.is_empty() || buf.len() % 16 != 0 {
+            return Err(format!("AES-CBC: data length {} not multiple of 16", buf.len()));
+        }
+
+        let result = Aes256CbcDec::new_from_slices(key, iv)
+            .map_err(|e| format!("AES-CBC init: {}", e))?
+            .decrypt_padded_mut::<aes::cipher::block_padding::Pkcs7>(&mut buf)
+            .map_err(|e| format!("AES-CBC PKCS7 decrypt: {}", e))?;
+
+        Ok(result.to_vec())
+    }
+
     // Decrypt E2EE message V2 (AES-256-GCM).
     // chunks: [salt, ciphertext+tag, nonce(sign), senderKeyId, receiverKeyId(optional)]
     pub fn decrypt_e2ee_message_v2(
@@ -206,6 +273,14 @@ impl E2EE {
         let aad = Self::generate_aad(
             to, from, sender_key_id, receiver_key_id, spec_version, content_type
         );
+
+        println!("DEBUG E2EE: senderKeyId={} receiverKeyId={} specVer={} contentType={}",
+            sender_key_id, receiver_key_id, spec_version, content_type);
+        println!("DEBUG E2EE: salt[..8]={:02x?} nonce_len={} ct_len={} tag={:02x?}",
+            &salt[..8.min(salt.len())], sign.len(), ciphertext.len(), &tag[..4.min(tag.len())]);
+        println!("DEBUG E2EE: sharedSecret[..8]={:02x?}", &shared_secret[..8.min(shared_secret.len())]);
+        println!("DEBUG E2EE: gcmKey[..8]={:02x?}", &gcm_key[..8.min(gcm_key.len())]);
+        println!("DEBUG E2EE: aad({} bytes)={:02x?}", aad.len(), &aad);
 
         // AES-256-GCM decrypt: combine ciphertext + tag for aes-gcm crate
         let mut ct_with_tag = Vec::with_capacity(ciphertext.len() + tag.len());
