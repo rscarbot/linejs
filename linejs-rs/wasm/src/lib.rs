@@ -211,6 +211,11 @@ impl LineClient {
             "e2eeKey": e2ee_key,
             "peerKeys": peer_keys,
             "myMid": self.my_mid,
+            "deviceType": match self.device.device_type {
+                DeviceType::DESKTOPWIN => "desktop",
+                DeviceType::IOSIPAD => "ipad",
+                _ => "ipad",
+            },
         });
 
         JsValue::from_str(&creds.to_string())
@@ -256,6 +261,17 @@ impl LineClient {
         let origin = web_sys::window()
             .and_then(|w| w.location().origin().ok())
             .unwrap_or_else(|| "http://localhost:8080".to_string());
+
+        // Restore device type
+        if let Some(device_type_str) = creds.get("deviceType").and_then(|v| v.as_str()) {
+            if device_type_str == "desktop" {
+                 self.device = DeviceDetails::new(DeviceType::DESKTOPWIN, None);
+                 console_log!("Restored device type: DESKTOPWIN");
+            } else {
+                 self.device = DeviceDetails::new(DeviceType::IOSIPAD, Some("15.5.0".to_string()));
+                 console_log!("Restored device type: IOSIPAD");
+            }
+        }
 
         let mut service_client = RequestClient::new(self.device.clone(), Some(origin.clone()));
         service_client.set_auth_token(auth_token.clone());

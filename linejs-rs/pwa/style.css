@@ -1,0 +1,355 @@
+:root {
+  --line-green: #06C755;
+  --line-green-dark: #05a648;
+  --bg: #f5f5f5;
+  --card-bg: #ffffff;
+  --text: #111827;
+  --text-muted: #6b7280;
+  --border: #e5e7eb;
+  --msg-self: #06C755;
+  --msg-peer: #ffffff;
+  --danger: #ef4444;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Header */
+.header {
+  background: var(--line-green);
+  color: white;
+  padding: 14px 20px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  z-index: 10;
+}
+
+.header h1 {
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.header .badge {
+  font-size: 11px;
+  background: rgba(255, 255, 255, 0.25);
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+
+.header .status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #fbbf24;
+  margin-left: auto;
+}
+
+.header .status-dot.online {
+  background: #ffffff;
+}
+
+/* Main content */
+.container {
+  flex: 1;
+  min-height: 0;
+  max-width: 480px;
+  width: 100%;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Screens */
+.screen {
+  display: none;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.screen.active {
+  display: flex;
+}
+
+/* Login Screen */
+#login-screen {
+  align-items: center;
+  justify-content: center;
+  padding: 30px 20px;
+  gap: 24px;
+}
+
+.login-logo {
+  font-size: 64px;
+  line-height: 1;
+}
+
+.login-title {
+  font-size: 22px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.login-desc {
+  color: var(--text-muted);
+  text-align: center;
+  font-size: 14px;
+  max-width: 300px;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 32px;
+  border: none;
+  border-radius: 24px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  min-width: 200px;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--line-green);
+  color: white;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--line-green-dark);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(6, 199, 85, 0.3);
+}
+
+.btn-secondary {
+  background: var(--border);
+  color: var(--text);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: #d1d5db;
+  transform: translateY(-1px);
+}
+
+/* QR Screen */
+#qr-screen {
+  align-items: center;
+  padding: 30px 20px;
+  gap: 20px;
+}
+
+.qr-container {
+  background: white;
+  padding: 16px;
+  border-radius: 16px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+}
+
+.qr-container img {
+  width: 240px;
+  height: 240px;
+  display: block;
+}
+
+.qr-label {
+  font-size: 15px;
+  font-weight: 600;
+  text-align: center;
+}
+
+.qr-sublabel {
+  color: var(--text-muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+/* PIN Screen */
+#pin-screen {
+  align-items: center;
+  justify-content: center;
+  padding: 30px 20px;
+  gap: 20px;
+}
+
+.pin-display {
+  font-size: 48px;
+  font-weight: 800;
+  letter-spacing: 12px;
+  color: var(--line-green);
+  background: white;
+  padding: 20px 40px;
+  border-radius: 16px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+}
+
+/* Chat Screen */
+#chat-screen {
+  padding: 0;
+  overflow: hidden;
+}
+
+.messages-container {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: #8CABD9;
+  background-image: linear-gradient(135deg, #8CABD9 0%, #7B9ECF 100%);
+}
+
+.message {
+  max-width: 75%;
+  padding: 10px 14px;
+  border-radius: 18px;
+  font-size: 14px;
+  line-height: 1.45;
+  word-break: break-word;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+.message.received {
+  align-self: flex-start;
+  background: var(--msg-peer);
+  color: var(--text);
+  border-bottom-left-radius: 4px;
+}
+
+.message.sent {
+  align-self: flex-end;
+  background: var(--msg-self);
+  color: white;
+  border-bottom-right-radius: 4px;
+}
+
+.message .meta {
+  font-size: 11px;
+  opacity: 0.65;
+  margin-top: 4px;
+}
+
+.message.system {
+  align-self: center;
+  background: rgba(0, 0, 0, 0.2);
+  color: white;
+  font-size: 12px;
+  padding: 6px 14px;
+  border-radius: 12px;
+  max-width: 90%;
+}
+
+/* Spinner */
+.spinner {
+  width: 24px;
+  height: 24px;
+  border: 3px solid rgba(0, 0, 0, 0.1);
+  border-top-color: var(--line-green);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  margin: 0 auto;
+}
+
+.spinner.white {
+  border-color: rgba(255, 255, 255, 0.3);
+  border-top-color: white;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Status bar at bottom */
+.status-bar {
+  padding: 8px 16px;
+  font-size: 12px;
+  color: var(--text-muted);
+  background: var(--card-bg);
+  border-top: 1px solid var(--border);
+  text-align: center;
+}
+
+/* Log panel */
+.log-toggle {
+  position: fixed;
+  bottom: 12px;
+  right: 12px;
+  background: #1f2937;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 11px;
+  cursor: pointer;
+  z-index: 100;
+  opacity: 0.7;
+}
+
+.log-toggle:hover {
+  opacity: 1;
+}
+
+.log-panel {
+  display: none;
+  position: fixed;
+  bottom: 44px;
+  right: 12px;
+  width: 360px;
+  max-height: 300px;
+  background: #1f2937;
+  color: #d1d5db;
+  border-radius: 8px;
+  overflow-y: auto;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 11px;
+  padding: 10px;
+  z-index: 100;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+}
+
+.log-panel.open {
+  display: block;
+}
+
+.log-entry {
+  padding: 2px 0;
+  border-bottom: 1px solid #374151;
+}
+
+.log-entry.error {
+  color: #f87171;
+}
+
+.log-entry.success {
+  color: #34d399;
+}
+
+@media (max-width: 480px) {
+  .container {
+    max-width: 100%;
+  }
+}
