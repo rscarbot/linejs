@@ -1,1 +1,7 @@
 target/
+linejs_credential.json
+run.log
+pwa/pkg
+pwa/node_modules
+__pycache__
+*.pyc

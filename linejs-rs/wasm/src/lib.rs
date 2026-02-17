@@ -57,7 +57,7 @@ impl LineClient {
             self.device = DeviceDetails::new(DeviceType::DESKTOPWIN, None);
             console_log!("Switched to DESKTOPWIN mode");
         } else {
-            self.device = DeviceDetails::new(DeviceType::IOSIPAD, None);
+            self.device = DeviceDetails::new(DeviceType::IOSIPAD, Some("15.5.0".to_string()));
             console_log!("Switched to IOSIPAD mode");
         }
     }

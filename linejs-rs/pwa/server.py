@@ -90,9 +90,13 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
         sys.stderr.write(f"[{self.log_date_time_string()}] {format % args}\n")
 
 
+class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+
 if __name__ == '__main__':
-    socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(('', PORT), ProxyHandler) as httpd:
-        print(f"LINEJS PWA server at http://localhost:{PORT}")
-        print(f"Proxying API requests to https://{LINE_HOST}")
+    ThreadedHTTPServer.allow_reuse_address = True
+    print(f"LINEJS PWA server at http://localhost:{PORT}")
+    print(f"Proxying API requests to https://{LINE_HOST}")
+    
+    with ThreadedHTTPServer(('', PORT), ProxyHandler) as httpd:
         httpd.serve_forever()

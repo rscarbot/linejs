@@ -156,6 +156,16 @@
       box-shadow: 0 4px 12px rgba(6, 199, 85, 0.3);
     }
 
+    .btn-secondary {
+      background: var(--border);
+      color: var(--text);
+    }
+
+    .btn-secondary:hover:not(:disabled) {
+      background: #d1d5db;
+      transform: translateY(-1px);
+    }
+
     /* QR Screen */
     #qr-screen {
       align-items: center;
@@ -404,6 +414,14 @@
       </div>
       <div class="spinner" id="qr-spinner" style="display:none;"></div>
       <div class="qr-sublabel" id="qr-status">Waiting for scan...</div>
+      <button class="btn btn-secondary" onclick="cancelLogin()" style="margin-top: 10px;">
+        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="18" y1="6" x2="6" y2="18"></line>
+          <line x1="6" y1="6" x2="18" y2="18"></line>
+        </svg>
+        Cancel
+      </button>
     </div>
 
     <!-- PIN Screen -->
@@ -434,11 +452,13 @@
 
     let client = null;
     let pollInterval = null;
+    let loginGen = 0; // Generation counter to stop old polls
 
     // Expose functions to global scope for onclick handlers
     window.startLogin = startLogin;
     window.toggleLog = toggleLog;
     window.doLogout = doLogout;
+    window.cancelLogin = cancelLogin;
 
     function doLogout() {
       localStorage.removeItem('linejs_credentials');
@@ -451,7 +471,25 @@
       setStatus('Logged out. Ready to login');
       log('Logged out, credentials cleared', 'success');
       // Re-create client to clear internal state
+      if (client) {
+        try { client.free(); } catch (e) { }
+      }
       client = new LineClient();
+      loginGen++;
+    }
+
+    function cancelLogin() {
+      log('Login cancelled by user');
+      showScreen('login-screen');
+      document.getElementById('btn-login').disabled = false;
+      document.getElementById('btn-login').textContent = 'Login with QR Code';
+      setStatus('Login cancelled. Ready to login');
+      // Re-create client to clear login state
+      if (client) {
+        try { client.free(); } catch (e) { }
+      }
+      client = new LineClient();
+      loginGen++;
     }
 
     function log(msg, type = '') {
@@ -535,8 +573,16 @@
       setStatus('Creating login session...');
       log('Starting QR login flow...');
 
+      const currentGen = ++loginGen;
+
       try {
         const resultStr = await client.createQrLogin();
+        // Check if cancelled during await
+        if (currentGen !== loginGen) {
+          log('Login flow cancelled during creation', 'warn');
+          return;
+        }
+
         const result = JSON.parse(resultStr);
         log('QR code generated', 'success');
 
@@ -546,7 +592,7 @@
         setStatus('Scan the QR code with LINE app');
 
         // Poll for QR verification
-        pollQrVerification();
+        pollQrVerification(currentGen);
       } catch (e) {
         log('Login error: ' + e, 'error');
         setStatus('Login failed: ' + e);
@@ -555,7 +601,9 @@
       }
     }
 
-    async function pollQrVerification() {
+    async function pollQrVerification(gen) {
+      if (gen !== loginGen) return; // Stop if new login started
+
       log('Waiting for QR scan...');
       document.getElementById('qr-status').textContent = 'Waiting for scan...';
 
@@ -569,7 +617,9 @@
         } else {
           log('QR poll timeout, retrying...');
           // Retry
-          pollQrVerification();
+          if (gen === loginGen) {
+            pollQrVerification(gen);
+          }
         }
       } catch (e) {
         log('QR verification error: ' + e, 'error');
