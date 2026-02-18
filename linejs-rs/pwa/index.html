@@ -9,15 +9,14 @@
   <link rel="manifest" href="manifest.json">
   <link rel="icon"
     href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💬</text></svg>">
-  <title>LINEJS WASM</title>
+  <title>LINE for Driver</title>
   <link rel="stylesheet" href="style.css">
 </head>
 
 <body>
   <div class="header">
     <span style="font-size: 22px;">💬</span>
-    <h1>LINEJS</h1>
-    <span class="badge">WASM + Rust</span>
+    <h1>LINE for Driver</h1>
     <div class="status-dot" id="status-dot"></div>
     <button id="btn-logout" onclick="doLogout()"
       style="display:none; background:none; border:none; color:white; font-size:20px; cursor:pointer; margin-left:8px;"
@@ -101,7 +100,7 @@
     window.cancelLogin = cancelLogin;
 
     function doLogout() {
-      localStorage.removeItem('linejs_credentials');
+      localStorage.removeItem('line_credentials');
       setOnline(false);
       document.getElementById('btn-logout').style.display = 'none';
       document.getElementById('btn-login').disabled = false;
@@ -160,7 +159,7 @@
       dot.classList.toggle('online', online);
     }
 
-    const CRED_KEY = 'linejs_credentials';
+    const CRED_KEY = 'line_credentials';
 
     // Initialize WASM and attempt auto-login from saved credentials
     async function initWasm() {
@@ -370,8 +369,8 @@
           backoff = 200;
 
           for (const msg of messages) {
-            addChatMessage(msg.text, msg.isSend, msg.from, msg.to);
-            log(`Message: [From:${msg.from}] [To:${msg.to}] ${msg.text}`);
+            addChatMessage(msg.text, msg.isSend, msg.from, msg.to, msg.fromName, msg.toName, msg.fromPic, msg.toPic);
+            log(`Message: [${msg.fromName || msg.from} -> ${msg.toName || msg.to}] ${msg.text}`);
           }
 
           // Re-save credentials every 10 polls to persist newly discovered peer keys
@@ -431,26 +430,67 @@
       container.scrollTop = container.scrollHeight;
     }
 
-    function addChatMessage(text, isSend, from, to) {
+    function addChatMessage(text, isSend, from, to, fromName, toName, fromPic, toPic) {
       const container = document.getElementById('messages-container');
       // Check if user is at bottom BEFORE appending
       const shouldScroll = isAtBottom(container);
 
       const div = document.createElement('div');
       div.className = 'message ' + (isSend ? 'sent' : 'received');
+      // Show avatar + sender name as title header for received messages
+      if (!isSend) {
+        // Remove default padding from bubble; header and body will handle their own
+        div.style.padding = '0';
+        div.style.overflow = 'hidden';
+
+        const headerRow = document.createElement('div');
+        headerRow.style.cssText = 'display:flex; align-items:center; gap:8px; padding:8px 14px; background:linear-gradient(135deg, #e8f5e9, #f1f8e9); border-bottom:1px solid rgba(6,199,85,0.15);';
+
+        // Avatar to picturePath
+        const pic = toPic;
+        if (pic) {
+          const avatar = document.createElement('img');
+          avatar.src = 'https://profile.line-scdn.net' + pic + '/preview';
+          avatar.style.cssText = 'width:28px; height:28px; border-radius:50%; object-fit:cover; flex-shrink:0; border:2px solid #fff; box-shadow:0 1px 3px rgba(0,0,0,0.12);';
+          avatar.onerror = function () { this.style.display = 'none'; };
+          headerRow.appendChild(avatar);
+        }
+
+        if (toName) {
+          const nameNode = document.createElement('span');
+          nameNode.style.cssText = 'font-size:12px; font-weight:700; color:#2e7d32;';
+          nameNode.textContent = toName;
+          headerRow.appendChild(nameNode);
+        }
+
+        div.appendChild(headerRow);
+
+        // Wrap content + meta in a body div with its own padding
+        div._bodyWrapper = document.createElement('div');
+        div._bodyWrapper.style.cssText = 'padding:8px 14px;';
+      }
 
       const textNode = document.createElement('div');
+      textNode.style.whiteSpace = 'pre-wrap';
       textNode.textContent = text;
-      div.appendChild(textNode);
 
       const meta = document.createElement('div');
       meta.className = 'meta';
-      // Display full MIDs for debugging
-      meta.textContent = (isSend ? 'You' : '') +
-        ' [From: ' + from + ']' +
-        (to ? ' [To: ' + to + ']' : '') +
+      // Show displayName with MID fallback
+      const displayFrom = fromName || from;
+      const displayTo = toName || to;
+      meta.textContent = (isSend ? 'You' : displayFrom) +
+        (displayTo ? ' → ' + displayTo : '') +
         ' · ' + new Date().toLocaleTimeString();
-      div.appendChild(meta);
+
+      // For received messages, append into body wrapper (below title header)
+      const target = div._bodyWrapper || div;
+      target.appendChild(textNode);
+      target.appendChild(meta);
+      if (div._bodyWrapper) {
+        div.appendChild(div._bodyWrapper);
+        delete div._bodyWrapper;
+      }
 
       container.appendChild(div);
       // Only auto-scroll if user was already at the bottom
