@@ -143,37 +143,28 @@ impl E2EE {
         let aes_iv_full = Self::sha256_sum(&[&shared_secret, b"IV"]);
         let aes_iv = Self::xor(&aes_iv_full);
 
+        println!("DEBUG decodeE2EEKeyV1: sqrSecret[..4]={:02x?} serverPub[..4]={:02x?}",
+            &sqr_secret_key[..4.min(sqr_secret_key.len())],
+            &server_public_key[..4.min(server_public_key.len())]);
+        println!("DEBUG decodeE2EEKeyV1: sharedSecret[..8]={:02x?}", &shared_secret[..8]);
+        println!("DEBUG decodeE2EEKeyV1: aesKey[..8]={:02x?} aesIv={:02x?}", &aes_key[..8], &aes_iv);
+
         // Decrypt the key chain
         let keychain_data = Self::decrypt_aes_cbc(&aes_key, &aes_iv, &encrypted_key_chain)?;
 
-        // Parse Thrift struct to extract privKey and pubKey.
-        // The key chain is a Thrift struct containing a nested struct
-        // at field 1, which has pubKey at subfield 4 and privKey at subfield 5.
-        let mut cursor = std::io::Cursor::new(&keychain_data);
-        let mut proto = crate::thrift::CompactProtocol::new(
-            Some(&mut cursor), None::<&mut Vec<u8>>
-        );
-        let val = proto.read_struct_to_value()
-            .map_err(|e| format!("parse key chain Thrift: {}", e))?;
+        println!("DEBUG decodeE2EEKeyV1: keychain_data({} bytes) hex={}",
+            keychain_data.len(), hex::encode(&keychain_data));
 
-        // Navigate: val["1"] is a list, first element has fields "4" (pubKey) and "5" (privKey)
-        let inner = val.get("1")
-            .and_then(|v| v.as_array())
-            .and_then(|arr| arr.first())
-            .ok_or("key chain: missing inner struct")?;
+        // Parse Thrift key chain directly using raw binary reads to avoid
+        // the UTF-8/base64 corruption in read_struct_to_value.
+        // Structure: outer struct → field 1 (list of structs) → find element by keyId
+        //   → field 4 (pubKey binary), field 5 (privKey binary)
+        let target_key_id: i32 = key_id.parse().unwrap_or(0);
+        let (pub_key, priv_key) = Self::parse_key_chain_raw(&keychain_data, target_key_id)?;
 
-        // Extract pubKey (field 4) and privKey (field 5) as base64 strings
-        let pub_key_b64 = inner.get("4")
-            .and_then(|v| v.as_str())
-            .ok_or("key chain: missing pubKey")?;
-        let priv_key_b64 = inner.get("5")
-            .and_then(|v| v.as_str())
-            .ok_or("key chain: missing privKey")?;
-
-        let pub_key = general_purpose::STANDARD.decode(pub_key_b64)
-            .map_err(|e| format!("decode pubKey: {}", e))?;
-        let priv_key = general_purpose::STANDARD.decode(priv_key_b64)
-            .map_err(|e| format!("decode privKey: {}", e))?;
+        println!("DEBUG decodeE2EEKeyV1: pubKey({} bytes)[..4]={:02x?} privKey({} bytes)[..4]={:02x?}",
+            pub_key.len(), &pub_key[..4.min(pub_key.len())],
+            priv_key.len(), &priv_key[..4.min(priv_key.len())]);
 
         Ok(E2EEKeyData {
             key_id: key_id.to_string(),
@@ -181,6 +172,89 @@ impl E2EE {
             pub_key,
             e2ee_version: e2ee_version.to_string(),
         })
+    }
+
+    // Parse the decrypted key chain Thrift struct directly using raw binary reads.
+    // This avoids the UTF-8/base64 corruption in read_struct_to_value().
+    // Iterates through ALL key entries and selects the one matching target_key_id.
+    // Returns (pub_key, priv_key) as raw bytes.
+    fn parse_key_chain_raw(data: &[u8], target_key_id: i32) -> Result<(Vec<u8>, Vec<u8>), String> {
+        use crate::thrift::{CompactProtocol, TType};
+        let mut cursor = std::io::Cursor::new(data);
+        let mut proto = CompactProtocol::new(
+            Some(&mut cursor), None::<&mut Vec<u8>>
+        );
+
+        // Read outer struct fields until we find field 1 (list of key structs)
+        proto.read_struct_begin().map_err(|e| format!("key chain outer struct: {}", e))?;
+        loop {
+            let (ttype, fid) = proto.read_field_begin()
+                .map_err(|e| format!("key chain field begin: {}", e))?;
+            if ttype == TType::Stop { return Err("key chain: field 1 (list) not found".to_string()); }
+            if fid == 1 && (ttype == TType::List || ttype == TType::Set) {
+                // Read list header
+                let header = proto.read_byte_raw()
+                    .map_err(|e| format!("key chain list header: {}", e))?;
+                let mut size = (header >> 4) as i32;
+                if size == 15 {
+                    size = proto.read_varint_raw()
+                        .map_err(|e| format!("key chain list size: {}", e))? as i32;
+                }
+                let _etype = header & 0x0f; // should be 0x0C (struct)
+                if size < 1 { return Err("key chain: empty key list".to_string()); }
+
+                println!("DEBUG parse_key_chain_raw: list has {} entries, looking for keyId={}",
+                    size, target_key_id);
+
+                // Iterate through ALL entries, find the one matching target_key_id
+                let mut best_match: Option<(i32, Vec<u8>, Vec<u8>)> = None; // (keyId, pub, priv)
+                let mut last_entry: Option<(i32, Vec<u8>, Vec<u8>)> = None;
+                for idx in 0..size {
+                    let mut entry_key_id: i32 = 0;
+                    let mut pub_key: Option<Vec<u8>> = None;
+                    let mut priv_key: Option<Vec<u8>> = None;
+                    proto.read_struct_begin().map_err(|e| format!("key chain inner struct: {}", e))?;
+                    loop {
+                        let (ft, fid2) = proto.read_field_begin()
+                            .map_err(|e| format!("key chain inner field: {}", e))?;
+                        if ft == TType::Stop { break; }
+                        if (ft == TType::I32 || ft == TType::I16) && fid2 == 2 {
+                            entry_key_id = proto.read_i32()
+                                .map_err(|e| format!("key chain keyId read: {}", e))?;
+                        } else if ft == TType::String && fid2 == 4 {
+                            pub_key = Some(proto.read_binary()
+                                .map_err(|e| format!("key chain pubKey read: {}", e))?);
+                        } else if ft == TType::String && fid2 == 5 {
+                            priv_key = Some(proto.read_binary()
+                                .map_err(|e| format!("key chain privKey read: {}", e))?);
+                        } else {
+                            proto.skip(ft).map_err(|e| format!("key chain skip: {}", e))?;
+                        }
+                    }
+                    proto.read_struct_end().map_err(|e| format!("key chain inner struct end: {}", e))?;
+
+                    if let (Some(ref pk), Some(ref sk)) = (&pub_key, &priv_key) {
+                        println!("DEBUG parse_key_chain_raw: entry[{}] keyId={} pubKey[..4]={:02x?}",
+                            idx, entry_key_id, &pk[..4.min(pk.len())]);
+                        let entry = (entry_key_id, pk.clone(), sk.clone());
+                        if entry_key_id == target_key_id {
+                            best_match = Some(entry.clone());
+                        }
+                        last_entry = Some(entry);
+                    }
+                }
+
+                // Prefer the entry matching target_key_id; fall back to last entry
+                let (matched_id, pub_key, priv_key) = best_match
+                    .or(last_entry)
+                    .ok_or("key chain: no valid key entries found")?;
+                println!("DEBUG parse_key_chain_raw: selected keyId={} (target={})",
+                    matched_id, target_key_id);
+                return Ok((pub_key, priv_key));
+            } else {
+                proto.skip(ttype).map_err(|e| format!("key chain skip outer: {}", e))?;
+            }
+        }
     }
 
     // Build AAD (Additional Authenticated Data) for AES-256-GCM.

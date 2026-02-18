@@ -80,6 +80,9 @@ impl<R: Read, W: Write> CompactProtocol<R, W> {
         Self { reader, writer, last_field_id: 0, field_id_stack: Vec::new(), boolean_field: None }
     }
 
+    pub fn read_byte_raw(&mut self) -> Result<u8> { self.read_byte() }
+    pub fn read_varint_raw(&mut self) -> Result<u64> { self.read_varint() }
+
     fn read_byte(&mut self) -> Result<u8> {
         let mut b = [0u8; 1];
         self.reader.as_mut().unwrap().read_exact(&mut b)?;

@@ -51,7 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Attempt token-based login if we have a saved auth token
     let (auth_token, self_key) = if credential.has_auth_token() {
         println!("Found saved auth token, attempting token login...");
-        match try_token_login(&device, &credential).await {
+        match try_token_login(&device, &mut credential, &credential_path).await {
             Ok((token, key)) => {
                 println!("Token login successful!");
                 (token, key)
@@ -73,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sync_state = SyncState::new();
 
     // Cache peer public keys to avoid repeated negotiation calls
-    let mut peer_key_cache: HashMap<String, Vec<u8>> = HashMap::new();
+    let mut peer_key_cache: HashMap<String, (i64, Vec<u8>)> = HashMap::new();
     let my_mid = credential.mid.clone().unwrap_or_default();
 
     // Cache MID -> displayName; restore from saved credentials
@@ -320,9 +320,11 @@ async fn do_email_login(
 }
 
 /// Try to login using a saved auth token by setting it and testing with a sync call.
+/// Also ensures MID is populated and E2EE key is current.
 async fn try_token_login(
     device: &DeviceDetails,
-    credential: &Credential,
+    credential: &mut Credential,
+    credential_path: &str,
 ) -> Result<(String, Option<E2EEKeyData>), Box<dyn std::error::Error>> {
     let token = credential.auth_token.as_ref().unwrap().clone();
 
@@ -338,13 +340,84 @@ async fn try_token_login(
 
     println!("Auth Token: {}...{}", &token[..8.min(token.len())], &token[token.len().saturating_sub(4)..]);
 
-    // Restore saved E2EE key
+    // Fetch MID from profile if not saved (needed for is_self detection in E2EE)
+    if credential.mid.is_none() {
+        match talk_service.get_profile().await {
+            Ok(profile) => {
+                if let Some(mid) = profile.get("1").and_then(|v| v.as_str()) {
+                    println!("Fetched MID from profile: {}", mid);
+                    credential.mid = Some(mid.to_string());
+                    if let Some(name) = profile.get("3").and_then(|v| v.as_str()) {
+                        credential.display_names.insert(mid.to_string(), name.to_string());
+                    }
+                }
+            }
+            Err(e) => println!("Warning: Failed to fetch profile for MID: {}", e),
+        }
+    }
+
+    // Restore saved E2EE key and verify it matches server's current key
     let self_key = credential.get_e2ee_key();
     if let Some(ref key) = self_key {
         println!("Restored E2EE key from credentials: keyId={}", key.key_id);
-    } else {
+        // Verify key consistency: compute pubKey from privKey and compare with stored pubKey
+        if key.priv_key.len() == 32 {
+            let derived_pub = x25519_dalek::PublicKey::from(
+                &x25519_dalek::StaticSecret::from(<[u8; 32]>::try_from(&key.priv_key[..]).unwrap())
+            );
+            let stored_pub_hex = hex::encode(&key.pub_key);
+            let derived_pub_hex = hex::encode(derived_pub.as_bytes());
+            if stored_pub_hex != derived_pub_hex {
+                println!("WARNING: E2EE key inconsistency! stored pubKey != derived from privKey");
+                println!("  stored:  {}", stored_pub_hex);
+                println!("  derived: {}", derived_pub_hex);
+            } else {
+                println!("E2EE key self-check OK: pubKey matches privKey");
+            }
+        }
+        // Also compare with server's registered key for our MID
+        if let Some(ref my_mid) = credential.mid {
+            match talk_service.negotiate_e2ee_public_key(my_mid).await {
+                Ok((server_key_id, server_pub_key)) => {
+                    println!("Server has keyId={} for our MID, pubKey[..4]={:02x?}",
+                        server_key_id, &server_pub_key[..4.min(server_pub_key.len())]);
+                    if server_key_id != key.key_id.parse::<i64>().unwrap_or(0) {
+                        println!("WARNING: Server keyId {} != our keyId {}!", server_key_id, key.key_id);
+                    }
+                    if server_pub_key != key.pub_key {
+                        println!("WARNING: Server pubKey != our stored pubKey!");
+                        println!("  server: {}", hex::encode(&server_pub_key));
+                        println!("  ours:   {}", hex::encode(&key.pub_key));
+                    }
+                }
+                Err(e) => println!("Warning: Failed to check own E2EE key on server: {}", e),
+            }
+        }
+    }
+
+    // Check server's registered E2EE public keys to verify our key is current
+    match talk_service.get_e2ee_public_keys().await {
+        Ok(server_keys) => {
+            println!("Server E2EE keys: {:?}", server_keys.iter().map(|(id, _)| id).collect::<Vec<_>>());
+            if let Some(ref key) = self_key {
+                let our_key_id: i64 = key.key_id.parse().unwrap_or(0);
+                if !server_keys.iter().any(|(id, _)| *id == our_key_id) {
+                    println!("WARNING: Saved E2EE keyId={} not found in server keys! E2EE decryption may fail.", key.key_id);
+                    println!("  You may need to re-login (email or QR) to register a new E2EE key.");
+                }
+            } else if !server_keys.is_empty() {
+                println!("Warning: No saved E2EE key, but server has {} keys. Re-login needed for E2EE.", server_keys.len());
+            }
+        }
+        Err(e) => println!("Warning: Failed to check E2EE public keys: {}", e),
+    }
+
+    if self_key.is_none() {
         println!("Warning: No saved E2EE key, messages will not be decrypted");
     }
+
+    // Save updated credentials (MID may have been fetched)
+    let _ = credential.save(credential_path);
 
     Ok((token, self_key))
 }
@@ -539,7 +612,7 @@ async fn decrypt_message_text(
     msg: &serde_json::Value,
     self_key: &Option<E2EEKeyData>,
     talk_service: &TalkService,
-    peer_key_cache: &mut HashMap<String, Vec<u8>>,
+    peer_key_cache: &mut HashMap<String, (i64, Vec<u8>)>,
     my_mid: &str,
 ) -> String {
     // Field 10 is plain text fallback
@@ -594,11 +667,27 @@ async fn decrypt_message_text(
                 if chunks.len() >= min_chunks {
                     // Determine peer MID: for self-sent use recipient, for received use sender
                     let peer_mid = if is_self { to } else { from };
-                    let peer_pub_key = get_peer_public_key(peer_mid, talk_service, peer_key_cache).await;
-                    if peer_pub_key.is_none() {
+                    let peer_info = get_peer_public_key(peer_mid, talk_service, peer_key_cache).await;
+                    if peer_info.is_none() {
                         return "[E2EE: Peer key not found]".to_string();
                     }
-                    let peer_public_key = peer_pub_key.unwrap();
+                    let (peer_key_id, peer_public_key) = peer_info.unwrap();
+
+                    // Verify keyIds match what the message expects
+                    let sender_key_id = if chunks.len() > 3 { i32::from_be_bytes([chunks[3][0], chunks[3][1], chunks[3][2], chunks[3][3]]) as i64 } else { 0 };
+                    let receiver_key_id = if chunks.len() > 4 { i32::from_be_bytes([chunks[4][0], chunks[4][1], chunks[4][2], chunks[4][3]]) as i64 } else { 0 };
+                    let self_key_id: i64 = self_key_data.key_id.parse().unwrap_or(0);
+                    let expected_peer_key_id = if is_self { receiver_key_id } else { sender_key_id };
+
+                    println!("DEBUG: selfKeyId={} peerNegotiatedKeyId={} expectedPeerKeyId={} (is_self={})",
+                        self_key_id, peer_key_id, expected_peer_key_id, is_self);
+                    if peer_key_id != expected_peer_key_id {
+                        println!("WARNING: Peer keyId mismatch! negotiate returned {} but message expects {}", peer_key_id, expected_peer_key_id);
+                    }
+                    let expected_self_key_id = if is_self { sender_key_id } else { receiver_key_id };
+                    if self_key_id != expected_self_key_id {
+                        println!("WARNING: Self keyId mismatch! our key is {} but message expects {}", self_key_id, expected_self_key_id);
+                    }
 
                     println!("DEBUG: selfPrivKey[..4]={:02x?} peerPubKey[..4]={:02x?}",
                         &self_key_data.priv_key[..4.min(self_key_data.priv_key.len())],
@@ -708,20 +797,23 @@ async fn resolve_display_name(
     }
 }
 
-// Get peer's E2EE public key, using cache or calling negotiateE2EEPublicKey
+// Get peer's E2EE public key, using cache or calling negotiateE2EEPublicKey.
+// Returns (keyId, keyData).
 async fn get_peer_public_key(
     mid: &str,
     talk_service: &TalkService,
-    cache: &mut HashMap<String, Vec<u8>>,
-) -> Option<Vec<u8>> {
-    if let Some(key) = cache.get(mid) {
-        return Some(key.clone());
+    cache: &mut HashMap<String, (i64, Vec<u8>)>,
+) -> Option<(i64, Vec<u8>)> {
+    if let Some(entry) = cache.get(mid) {
+        return Some(entry.clone());
     }
 
     match talk_service.negotiate_e2ee_public_key(mid).await {
-        Ok((_key_id, key_data)) => {
-            cache.insert(mid.to_string(), key_data.clone());
-            Some(key_data)
+        Ok((key_id, key_data)) => {
+            println!("DEBUG: negotiate keyId={} for mid={} pubKey[..4]={:02x?}",
+                key_id, mid, &key_data[..4.min(key_data.len())]);
+            cache.insert(mid.to_string(), (key_id, key_data.clone()));
+            Some((key_id, key_data))
         }
         Err(e) => {
             println!("Failed to get E2EE public key for {}: {}", mid, e);

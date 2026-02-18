@@ -91,6 +91,7 @@ impl TalkService {
         }
 
         let val = proto.read_struct_to_value()?;
+        println!("DEBUG negotiate raw response: {}", serde_json::to_string(&val).unwrap_or_default());
 
         // result field 0 = success (E2EENegotiationResult)
         let success = val.get("0")
@@ -104,6 +105,8 @@ impl TalkService {
         let key_id = pub_key_struct.get("2").and_then(|v| v.as_i64()).unwrap_or(0);
         let key_data_str = pub_key_struct.get("4").and_then(|v| v.as_str())
             .ok_or_else(|| ServiceError::Failed("No keyData in negotiate result".to_string()))?;
+        println!("DEBUG negotiate: keyId={}, keyData_str_len={}, keyData_str[..40]={:?}",
+            key_id, key_data_str.len(), &key_data_str[..40.min(key_data_str.len())]);
 
         // Thrift reader stores valid-UTF-8 binary as plain strings, non-UTF-8 as base64.
         // Try base64 decode first; if it fails, the string IS the raw UTF-8 bytes.
@@ -115,6 +118,55 @@ impl TalkService {
         };
 
         Ok((key_id, key_data))
+    }
+
+    // Get the user's own registered E2EE public keys.
+    // Returns a list of (keyId, keyData_bytes) pairs.
+    // Matching TS: getE2EEPublicKeys() → list of E2EEPublicKey structs
+    pub async fn get_e2ee_public_keys(&self) -> Result<Vec<(i64, Vec<u8>)>, ServiceError> {
+        let mut body = vec![0x82, 0x21, 0x00, 0x12];
+        body.extend_from_slice(b"getE2EEPublicKeys");
+        {
+            let mut proto = CompactProtocol::new(None::<Cursor<&[u8]>>, Some(&mut body));
+            proto.write_field_stop()?;
+        }
+        body.push(0x00);
+
+        let res = self.client.post_thrift("/S4", body, None).await?;
+        let bytes = res.bytes().await?;
+
+        if bytes.is_empty() {
+            return Err(ServiceError::Failed("Empty getE2EEPublicKeys response".to_string()));
+        }
+
+        let mut proto = CompactProtocol::new(Some(Cursor::new(&bytes)), None::<&mut Vec<u8>>);
+        let (_name, message_type, _seq) = proto.read_message_begin()?;
+        if message_type == 3 {
+            let val = proto.read_struct_to_value()?;
+            let msg = val.get("1").and_then(|v| v.as_str()).unwrap_or("getE2EEPublicKeys exception");
+            return Err(ServiceError::Failed(msg.to_string()));
+        }
+
+        let val = proto.read_struct_to_value()?;
+        // Field 0 = success (list of E2EEPublicKey structs)
+        let list = val.get("0").and_then(|v| v.as_array())
+            .ok_or_else(|| ServiceError::Failed("No keys in getE2EEPublicKeys result".to_string()))?;
+
+        let mut keys = Vec::new();
+        for item in list {
+            let key_id = item.get("2").and_then(|v| v.as_i64()).unwrap_or(0);
+            if let Some(key_data_str) = item.get("4").and_then(|v| v.as_str()) {
+                let key_data = match base64::Engine::decode(
+                    &base64::engine::general_purpose::STANDARD, key_data_str
+                ) {
+                    Ok(bytes) => bytes,
+                    Err(_) => key_data_str.as_bytes().to_vec(),
+                };
+                keys.push((key_id, key_data));
+            }
+        }
+
+        Ok(keys)
     }
 
     pub async fn get_profile(&self) -> Result<serde_json::Value, ServiceError> {
