@@ -27,6 +27,16 @@ pub struct LineClient {
     sync_state: Option<SyncState>,
     peer_key_cache: HashMap<String, (i32, Vec<u8>)>,
     my_mid: Option<String>,
+    display_name_cache: HashMap<String, String>,
+    picture_cache: HashMap<String, String>,
+    // Email login state (stored between emailLoginStart and emailLoginCheckPin)
+    email_login_keynm: Option<String>,
+    email_login_encrypted_msg: Option<String>,
+    email_login_cert: Option<String>,
+    email_login_verifier: Option<String>,
+    // E2EE Email Login state
+    email_login_e2ee_data: Option<Vec<u8>>,
+    email_login_sqr_secret: Option<Vec<u8>>,
 }
 
 #[wasm_bindgen]
@@ -47,6 +57,14 @@ impl LineClient {
             sync_state: None,
             peer_key_cache: HashMap::new(),
             my_mid: None,
+            display_name_cache: HashMap::new(),
+            picture_cache: HashMap::new(),
+            email_login_keynm: None,
+            email_login_encrypted_msg: None,
+            email_login_cert: None,
+            email_login_verifier: None,
+            email_login_e2ee_data: None,
+            email_login_sqr_secret: None,
         }
     }
 
@@ -181,6 +199,247 @@ impl LineClient {
         Ok(auth_token)
     }
 
+    /// Start email/password login. Returns JSON:
+    /// - On success: { "authToken": "...", "certificate": "..." }
+    /// - On PIN needed: { "pinCode": "..." }
+    #[wasm_bindgen(js_name = "emailLoginStart")]
+    pub async fn email_login_start(&mut self, email: &str, password: &str) -> Result<JsValue, JsValue> {
+        let origin = web_sys::window()
+            .and_then(|w| w.location().origin().ok())
+            .unwrap_or_else(|| "http://localhost:8080".to_string());
+        let request_client = RequestClient::new(self.device.clone(), Some(origin.clone()));
+        let login = Login::new(request_client);
+
+        // Generate client-side PIN (6 digits)
+        let mut pin_bytes = [0u8; 4];
+        getrandom::getrandom(&mut pin_bytes).map_err(|e| JsValue::from_str(&format!("RNG error: {}", e)))?;
+        let pin_val = u32::from_le_bytes(pin_bytes) % 1_000_000;
+        let pin_code = format!("{:06}", pin_val);
+
+        // Generate E2EE secret (S0, S0_pub)
+        let (secret_key, secret_pk_b64) = E2EE::create_sqr_secret_raw();
+        let secret_pk_bytes = general_purpose::STANDARD.decode(&secret_pk_b64)
+            .map_err(|e| JsValue::from_str(&format!("Base64 decode error: {}", e)))?;
+
+        // Encrypt PIN hash
+        let pin_hash = E2EE::sha256_sum(&[pin_code.as_bytes()]);
+        let e2ee_data = E2EE::encrypt_aes_ecb(&pin_hash, &secret_pk_bytes)
+             .map_err(|e| JsValue::from_str(&format!("E2EE encrypt error: {}", e)))?;
+
+        console_log!("Fetching RSA key...");
+        let (keynm, nvalue, evalue, session_key) = login.get_rsa_key_info().await
+            .map_err(|e| JsValue::from_str(&format!("getRSAKeyInfo: {}", e)))?;
+        console_log!("RSA key obtained: {}", keynm);
+
+        let encrypted_msg = Login::rsa_encrypt_credentials(&nvalue, &evalue, &session_key, email, password)
+            .map_err(|e| JsValue::from_str(&format!("RSA encrypt: {}", e)))?;
+
+        let device_name = self.device.device_type.as_str();
+        console_log!("Calling loginZ (initial)...");
+        // pass e2ee_data (loginType=2)
+        let result = login.login_z(&keynm, &encrypted_msg, device_name, None, None, Some(&e2ee_data)).await
+            .map_err(|e| JsValue::from_str(&format!("loginZ: {}", e)))?;
+
+        // Check if we got an authToken directly
+        if let Some(auth_token) = result.get("1").and_then(|v| v.as_str()) {
+            console_log!("Email login succeeded directly (certificate present)");
+            let cert = result.get("2").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+            // Extract MID from login response field "5" (matching main.rs)
+            let mid = result.get("5")
+                .or_else(|| result.get("0").and_then(|r| r.get("5")))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            if let Some(ref m) = mid {
+                console_log!("MID from email login: {}", m);
+                self.my_mid = Some(m.clone());
+            }
+
+            // Set up authenticated service client
+            self.proxy_origin = Some(origin.clone());
+            let mut service_client = RequestClient::new(self.device.clone(), Some(origin));
+            service_client.set_auth_token(auth_token.to_string());
+            self.talk_service = Some(TalkService::new(service_client));
+            self.sync_state = Some(SyncState::new());
+            self.auth_token = Some(auth_token.to_string());
+
+            // Fetch profile to populate displayName cache
+            if let Some(ts) = self.talk_service.as_ref() {
+                if let Ok(profile) = ts.get_profile().await {
+                    if let Some(pmid) = profile.get("1").and_then(|v| v.as_str()) {
+                        self.my_mid = Some(pmid.to_string());
+                        if let Some(name) = profile.get("3").and_then(|v| v.as_str()) {
+                            self.display_name_cache.insert(pmid.to_string(), name.to_string());
+                            console_log!("Logged in as: {} ({})", name, pmid);
+                        }
+                        if let Some(pic) = profile.get("4").and_then(|v| v.as_str()) {
+                            self.picture_cache.insert(pmid.to_string(), pic.to_string());
+                        }
+                    }
+                }
+            }
+
+            let resp = serde_json::json!({
+                "authToken": auth_token,
+                "certificate": cert,
+            });
+            return Ok(JsValue::from_str(&resp.to_string()));
+        }
+
+        // No authToken → PIN verification required
+        let verifier = result.get("3").and_then(|v| v.as_str())
+            .ok_or_else(|| JsValue::from_str("No verifier in loginZ response"))?;
+
+        // Display the pincode we generated (matching main.rs)
+        console_log!("PIN required: {}", pin_code);
+
+        // Store state for emailLoginCheckPin
+        self.login = Some(login);
+        self.proxy_origin = Some(origin);
+        self.email_login_keynm = Some(keynm);
+        self.email_login_encrypted_msg = Some(encrypted_msg);
+        self.email_login_verifier = Some(verifier.to_string());
+        self.email_login_cert = result.get("2").and_then(|v| v.as_str()).map(|s| s.to_string());
+        self.email_login_e2ee_data = Some(e2ee_data);
+        
+        // Store SQR secret for later E2EE derivation
+        self.email_login_sqr_secret = Some(secret_key);
+
+        let resp = serde_json::json!({ "pinCode": pin_code });
+        Ok(JsValue::from_str(&resp.to_string()))
+    }
+
+    /// Poll for email login PIN verification, then complete login.
+    /// Returns JSON: { "authToken": "...", "certificate": "..." }
+    #[wasm_bindgen(js_name = "emailLoginCheckPin")]
+    pub async fn email_login_check_pin(&mut self) -> Result<JsValue, JsValue> {
+        let login = self.login.as_ref()
+            .ok_or_else(|| JsValue::from_str("No login in progress"))?;
+        let verifier = self.email_login_verifier.as_ref()
+            .ok_or_else(|| JsValue::from_str("No verifier"))?;
+
+        console_log!("Polling for E2EE email PIN verification (/LF1)...");
+        let e2ee_info = login.poll_email_e2ee_info(verifier).await
+            .map_err(|e| JsValue::from_str(&format!("PIN poll/E2EE info: {}", e)))?;
+
+        console_log!("PIN verified, processing E2EE metadata...");
+
+        // Extract metadata
+        let metadata = e2ee_info.get("metadata")
+             .ok_or_else(|| JsValue::from_str("No metadata in E2EE response"))?;
+        let encrypted_key_chain_b64 = metadata.get("encryptedKeyChain").and_then(|v| v.as_str())
+             .ok_or_else(|| JsValue::from_str("Missing encryptedKeyChain"))?;
+        let public_key_b64 = metadata.get("publicKey").and_then(|v| v.as_str())
+             .ok_or_else(|| JsValue::from_str("Missing publicKey"))?;
+        let key_id = metadata.get("keyId").and_then(|v| v.as_str())
+             .or_else(|| metadata.get("keyId").and_then(|v| v.as_i64()).map(|_| ""))
+             .unwrap_or("");
+        let e2ee_version = metadata.get("e2eeVersion").and_then(|v| v.as_str()).unwrap_or("1");
+
+        // Restore SQR secret
+        let secret_bytes = self.email_login_sqr_secret.as_ref()
+            .ok_or_else(|| JsValue::from_str("SQR secret missing"))?;
+        let mut sk_bytes = [0u8; 32];
+        if secret_bytes.len() == 32 {
+            sk_bytes.copy_from_slice(secret_bytes);
+        } else {
+             return Err(JsValue::from_str("SQR secret invalid length"));
+        }
+        let sqr_secret = x25519_dalek::StaticSecret::from(sk_bytes);
+        
+        // Decode E2EE Key
+        match E2EE::decode_e2ee_key_v1(
+            encrypted_key_chain_b64, public_key_b64, key_id, e2ee_version, secret_bytes
+        ) {
+            Ok(key_data) => {
+                console_log!("E2EE Key extracted: keyId={}", key_data.key_id);
+                self.self_key = Some(key_data);
+            },
+            Err(e) => console_log!("Warning: E2EE key decode failed: {}", e),
+        }
+
+        // Encrypt device secret
+        let server_pub_bytes = general_purpose::STANDARD.decode(public_key_b64)
+            .map_err(|e| JsValue::from_str(&format!("B64 decode failed: {}", e)))?;
+        let encrypted_key_chain_bytes = general_purpose::STANDARD.decode(encrypted_key_chain_b64)
+            .map_err(|e| JsValue::from_str(&format!("B64 decode failed: {}", e)))?;
+
+        let device_secret = E2EE::encrypt_device_secret(&server_pub_bytes, &sqr_secret.to_bytes(), &encrypted_key_chain_bytes)
+            .map_err(|e| JsValue::from_str(&format!("Device secret encrypt failed: {}", e)))?;
+        
+        // Confirm E2EE login
+        let new_verifier = login.confirm_e2ee_login(verifier, &device_secret).await
+             .map_err(|e| JsValue::from_str(&format!("confirmE2EELogin: {}", e)))?;
+
+        console_log!("E2EE confirmed, finalizing login...");
+
+        // Re-call loginZ with the new verifier and e2ee_data
+        let keynm = self.email_login_keynm.as_ref()
+            .ok_or_else(|| JsValue::from_str("No keynm"))?;
+        let encrypted_msg = self.email_login_encrypted_msg.as_ref()
+            .ok_or_else(|| JsValue::from_str("No encrypted message"))?;
+        let device_name = self.device.device_type.as_str();
+        let cert = self.email_login_cert.as_deref();
+        let e2ee_data = self.email_login_e2ee_data.as_deref();
+
+        let result = login.login_z(keynm, encrypted_msg, device_name, cert, Some(&new_verifier), e2ee_data).await
+            .map_err(|e| JsValue::from_str(&format!("loginZ (final): {}", e)))?;
+
+        let auth_token = result.get("1").and_then(|v| v.as_str())
+            .ok_or_else(|| JsValue::from_str("No authToken after PIN verification"))?;
+        let certificate = result.get("2").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+        console_log!("Email login completed successfully");
+
+        // Extract MID from login response field "5" (matching main.rs)
+        let mid = result.get("5")
+            .or_else(|| result.get("0").and_then(|r| r.get("5")))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        if let Some(ref m) = mid {
+            console_log!("MID from email login: {}", m);
+            self.my_mid = Some(m.clone());
+        }
+
+        // Set up authenticated service client
+        let origin = self.proxy_origin.clone();
+        let mut service_client = RequestClient::new(self.device.clone(), origin);
+        service_client.set_auth_token(auth_token.to_string());
+        self.talk_service = Some(TalkService::new(service_client));
+        self.sync_state = Some(SyncState::new());
+        self.auth_token = Some(auth_token.to_string());
+
+        // Fetch profile to populate displayName cache (matching main.rs)
+        if let Some(ts) = self.talk_service.as_ref() {
+            if let Ok(profile) = ts.get_profile().await {
+                if let Some(pmid) = profile.get("1").and_then(|v| v.as_str()) {
+                    self.my_mid = Some(pmid.to_string());
+                    if let Some(name) = profile.get("3").and_then(|v| v.as_str()) {
+                        self.display_name_cache.insert(pmid.to_string(), name.to_string());
+                        console_log!("Logged in as: {} ({})", name, pmid);
+                    }
+                    if let Some(pic) = profile.get("4").and_then(|v| v.as_str()) {
+                        self.picture_cache.insert(pmid.to_string(), pic.to_string());
+                    }
+                }
+            }
+        }
+
+        // Clear email login state
+        self.email_login_keynm = None;
+        self.email_login_encrypted_msg = None;
+        self.email_login_verifier = None;
+        self.email_login_cert = None;
+        self.email_login_e2ee_data = None;
+        self.email_login_sqr_secret = None;
+
+        let resp = serde_json::json!({
+            "authToken": auth_token,
+            "certificate": certificate,
+        });
+        Ok(JsValue::from_str(&resp.to_string()))
+    }
+
     /// Export credentials (auth token + E2EE key) as JSON for persistence
     #[wasm_bindgen(js_name = "exportCredentials")]
     pub fn export_credentials(&self) -> JsValue {
@@ -206,6 +465,16 @@ impl LineClient {
             }))
         }).collect::<serde_json::Map<String, serde_json::Value>>().into();
 
+        // Serialize display name cache
+        let display_names: serde_json::Value = self.display_name_cache.iter()
+            .map(|(mid, name)| (mid.clone(), serde_json::Value::String(name.clone())))
+            .collect::<serde_json::Map<String, serde_json::Value>>().into();
+
+        // Serialize picture path cache
+        let pictures: serde_json::Value = self.picture_cache.iter()
+            .map(|(mid, path)| (mid.clone(), serde_json::Value::String(path.clone())))
+            .collect::<serde_json::Map<String, serde_json::Value>>().into();
+
         let creds = serde_json::json!({
             "authToken": auth_token,
             "e2eeKey": e2ee_key,
@@ -216,6 +485,8 @@ impl LineClient {
                 DeviceType::IOSIPAD => "ipad",
                 _ => "ipad",
             },
+            "displayNames": display_names,
+            "pictures": pictures,
         });
 
         JsValue::from_str(&creds.to_string())
@@ -306,6 +577,26 @@ impl LineClient {
             self.my_mid = Some(mid.to_string());
         }
 
+        // Restore display name cache if present
+        if let Some(display_names) = creds.get("displayNames").and_then(|v| v.as_object()) {
+            for (mid, name_val) in display_names {
+                if let Some(name) = name_val.as_str() {
+                    self.display_name_cache.insert(mid.clone(), name.to_string());
+                }
+            }
+            console_log!("Restored {} display name mappings", self.display_name_cache.len());
+        }
+
+        // Restore picture path cache if present
+        if let Some(pictures) = creds.get("pictures").and_then(|v| v.as_object()) {
+            for (mid, path_val) in pictures {
+                if let Some(path) = path_val.as_str() {
+                    self.picture_cache.insert(mid.clone(), path.to_string());
+                }
+            }
+            console_log!("Restored {} picture path mappings", self.picture_cache.len());
+        }
+
         console_log!("Session restored from saved credentials");
         Ok(())
     }
@@ -327,14 +618,27 @@ impl LineClient {
         self.sync_state = Some(sync_state);
         let operations = operations?;
 
-        // Ensure my_mid is populated
-        if self.my_mid.is_none() && self.talk_service.is_some() {
+        // Ensure my_mid is populated and own displayName is cached.
+        // Also fetch profile when my_mid was restored from credentials but displayName is missing.
+        let need_profile = self.talk_service.is_some() && (
+            self.my_mid.is_none() ||
+            self.my_mid.as_ref().map_or(false, |mid| !self.display_name_cache.contains_key(mid))
+        );
+        if need_profile {
              let ts = self.talk_service.as_ref().unwrap();
              match ts.get_profile().await {
                   Ok(profile) => {
                        if let Some(mid) = profile.get("1").and_then(|v| v.as_str()) {
                            self.my_mid = Some(mid.to_string());
-                           console_log!("Fetched my MID: {}", mid);
+                           // Cache own displayName from profile field 3
+                           if let Some(name) = profile.get("3").and_then(|v| v.as_str()) {
+                               self.display_name_cache.insert(mid.to_string(), name.to_string());
+                               console_log!("Logged in as: {}", name);
+                           }
+                           // Cache own picturePath from profile field 4
+                           if let Some(pic) = profile.get("4").and_then(|v| v.as_str()) {
+                               self.picture_cache.insert(mid.to_string(), pic.to_string());
+                           }
                        }
                   },
                   Err(e) => console_log!("Failed to fetch profile: {}", e)
@@ -358,9 +662,25 @@ impl LineClient {
                     ).await;
                     let is_send = op_type == 25;
 
+                    // Resolve displayName and picturePath for from and to MIDs
+                    let from_name = resolve_display_name(
+                        from, self.talk_service.as_ref().unwrap(),
+                        &mut self.display_name_cache, &mut self.picture_cache
+                    ).await;
+                    let to_name = resolve_display_name(
+                        to, self.talk_service.as_ref().unwrap(),
+                        &mut self.display_name_cache, &mut self.picture_cache
+                    ).await;
+                    let from_pic = self.picture_cache.get(from).cloned().unwrap_or_default();
+                    let to_pic = self.picture_cache.get(to).cloned().unwrap_or_default();
+
                     messages.push(serde_json::json!({
                         "from": from,
                         "to": to,
+                        "fromName": from_name,
+                        "toName": to_name,
+                        "fromPic": from_pic,
+                        "toPic": to_pic,
                         "text": text,
                         "isSend": is_send,
                         "timestamp": js_sys::Date::now() as u64
@@ -515,6 +835,84 @@ async fn decrypt_message(
     }
 
     raw_text.to_string()
+}
+
+// Resolve a MID to its displayName, with caching.
+// MIDs starting with 'c' are chat/group MIDs → use getChats (Chat field 6 = chatName, 7 = picturePath).
+// Other MIDs are user MIDs → use getContact (Contact field 22 = displayName, 27 = overridden, 37 = picturePath).
+async fn resolve_display_name(
+    mid: &str,
+    talk_service: &TalkService,
+    cache: &mut HashMap<String, String>,
+    pic_cache: &mut HashMap<String, String>,
+) -> String {
+    if mid.is_empty() {
+        return String::new();
+    }
+    if let Some(name) = cache.get(mid) {
+        // Only return cached name if we also have the picture (to support incremental avatar loading)
+        if pic_cache.contains_key(mid) {
+            return name.clone();
+        }
+        // If missing picture, fall through to fetch contact
+    }
+
+    if mid.starts_with('c') {
+        // Chat/group MID → use getChats to get chatName
+        match talk_service.get_chats(&[mid]).await {
+            Ok(resp) => {
+                // GetChatsResponse field 1 = chats (list of Chat)
+                // Chat field 6 = chatName, field 7 = picturePath
+                if let Some(chats) = resp.get("1").and_then(|v| v.as_array()) {
+                    if let Some(chat) = chats.first() {
+                        let name = chat.get("6")
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or(mid)
+                            .to_string();
+                        if let Some(pic) = chat.get("7").and_then(|v| v.as_str()) {
+                            pic_cache.insert(mid.to_string(), pic.to_string());
+                        }
+                        console_log!("Resolved chatName for {}: {}", mid, name);
+                        cache.insert(mid.to_string(), name.clone());
+                        return name;
+                    }
+                }
+                cache.insert(mid.to_string(), mid.to_string());
+                mid.to_string()
+            }
+            Err(e) => {
+                console_log!("Warning: Failed to resolve chatName for {}: {}", mid, e);
+                cache.insert(mid.to_string(), mid.to_string());
+                mid.to_string()
+            }
+        }
+    } else {
+        // User MID → use getContact
+        match talk_service.get_contact(mid).await {
+            Ok(contact) => {
+                // Prefer displayNameOverridden (field 27) if set, otherwise displayName (field 22)
+                let name = contact.get("27")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| contact.get("22").and_then(|v| v.as_str()))
+                    .unwrap_or(mid)
+                    .to_string();
+                // Contact field 37 = picturePath
+                if let Some(pic) = contact.get("37").and_then(|v| v.as_str()) {
+                    pic_cache.insert(mid.to_string(), pic.to_string());
+                }
+                console_log!("Resolved displayName for {}: {}", mid, name);
+                cache.insert(mid.to_string(), name.clone());
+                name
+            }
+            Err(e) => {
+                console_log!("Warning: Failed to resolve displayName for {}: {}", mid, e);
+                cache.insert(mid.to_string(), mid.to_string());
+                mid.to_string()
+            }
+        }
+    }
 }
 
 async fn get_peer_public_key(

@@ -150,6 +150,105 @@ impl TalkService {
         Ok(success.clone())
     }
 
+    /// Get contact info by MID. Returns the Contact struct as JSON.
+    /// Contact field 1 = mid, field 22 = displayName, field 27 = displayNameOverridden.
+    pub async fn get_contact(&self, mid: &str) -> Result<serde_json::Value, ServiceError> {
+        let mut body = vec![0x82, 0x21, 0x00, 0x0a];
+        body.extend_from_slice(b"getContact");
+        {
+            let mut proto = CompactProtocol::new(None::<Cursor<&[u8]>>, Some(&mut body));
+            // field 2 = mid (string)
+            proto.write_field_begin(TType::String, 2)?;
+            proto.write_string(mid)?;
+            proto.write_field_stop()?;
+        }
+        body.push(0x00);
+
+        let res = self.client.post_thrift("/S4", body, None).await?;
+        let bytes = res.bytes().await?;
+
+        if bytes.is_empty() {
+            return Err(ServiceError::Failed("Empty getContact response".to_string()));
+        }
+
+        let mut proto = CompactProtocol::new(Some(Cursor::new(&bytes)), None::<&mut Vec<u8>>);
+        let (_name, message_type, _seq) = proto.read_message_begin()?;
+        if message_type == 3 {
+            let val = proto.read_struct_to_value()?;
+            let msg = val.get("1").and_then(|v| v.as_str()).unwrap_or("getContact exception");
+            return Err(ServiceError::Failed(msg.to_string()));
+        }
+
+        let val = proto.read_struct_to_value()?;
+        let success = val.get("0")
+            .ok_or_else(|| ServiceError::Failed("No result in getContact".to_string()))?;
+
+        Ok(success.clone())
+    }
+
+    /// Get chat info by chat MID(s). Returns GetChatsResponse as JSON.
+    /// GetChatsResponse field 1 = chats (list of Chat).
+    /// Chat: field 2 = chatMid (string), field 6 = chatName (string).
+    /// getChats_args: field 1 = GetChatsRequest (struct), field 2 = syncReason (i32 enum).
+    /// GetChatsRequest: field 1 = chatMids (list<string>), field 2 = withMembers (bool), field 3 = withInvitees (bool).
+    pub async fn get_chats(&self, chat_mids: &[&str]) -> Result<serde_json::Value, ServiceError> {
+        let mut body = vec![0x82, 0x21, 0x00, 0x08];
+        body.extend_from_slice(b"getChats");
+        {
+            let mut proto = CompactProtocol::new(None::<Cursor<&[u8]>>, Some(&mut body));
+
+            // field 1 = GetChatsRequest (struct)
+            proto.write_field_begin(TType::Struct, 1)?;
+            proto.write_struct_begin()?;
+
+            // GetChatsRequest.chatMids: field 1, list<string>
+            proto.write_field_begin(TType::List, 1)?;
+            proto.write_list_begin(TType::String, chat_mids.len())?;
+            for mid in chat_mids {
+                proto.write_string(mid)?;
+            }
+
+            // GetChatsRequest.withMembers: field 2, bool = false
+            proto.write_field_begin(TType::Bool, 2)?;
+            proto.write_bool(false)?;
+
+            // GetChatsRequest.withInvitees: field 3, bool = false
+            proto.write_field_begin(TType::Bool, 3)?;
+            proto.write_bool(false)?;
+
+            proto.write_field_stop()?;
+            proto.write_struct_end()?;
+
+            // field 2 = syncReason (i32 enum Pb1_V7, 7 = INTERNAL)
+            proto.write_field_begin(TType::I32, 2)?;
+            proto.write_i32(7)?;
+
+            proto.write_field_stop()?;
+        }
+        body.push(0x00);
+
+        let res = self.client.post_thrift("/S4", body, None).await?;
+        let bytes = res.bytes().await?;
+
+        if bytes.is_empty() {
+            return Err(ServiceError::Failed("Empty getChats response".to_string()));
+        }
+
+        let mut proto = CompactProtocol::new(Some(Cursor::new(&bytes)), None::<&mut Vec<u8>>);
+        let (_name, message_type, _seq) = proto.read_message_begin()?;
+        if message_type == 3 {
+            let val = proto.read_struct_to_value()?;
+            let msg = val.get("1").and_then(|v| v.as_str()).unwrap_or("getChats exception");
+            return Err(ServiceError::Failed(msg.to_string()));
+        }
+
+        let val = proto.read_struct_to_value()?;
+        let success = val.get("0")
+            .ok_or_else(|| ServiceError::Failed("No result in getChats".to_string()))?;
+
+        Ok(success.clone())
+    }
+
     // Build the sync Thrift request body matching TypeScript's sync_args structure:
     // [12, 1, SyncRequest{ lastRevision(i64 f1), count(i32 f2),
     //   lastGlobalRevision(i64 f3), lastIndividualRevision(i64 f4) }]

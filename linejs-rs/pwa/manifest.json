@@ -1,7 +1,7 @@
 {
-  "name": "LINE Messenger",
-  "short_name": "LINE",
-  "description": "LINE Messaging Client for Driver",
+  "name": "Dispatcher Messenger",
+  "short_name": "Dispatcher",
+  "description": "Dispatcher Messaging Client",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#f5f5f5",

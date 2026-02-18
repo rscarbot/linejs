@@ -45,14 +45,7 @@ impl RequestClient {
             format!("https://{}{}", self.endpoint, path)
         };
         let mut headers = header::HeaderMap::new();
-        let host = if self.endpoint.starts_with("http") {
-            // Extract host from URL for proxy mode
-            self.endpoint.split("//").nth(1).unwrap_or(&self.endpoint)
-                .split('/').next().unwrap_or(&self.endpoint).to_string()
-        } else {
-            self.endpoint.clone()
-        };
-        headers.insert(header::HOST, header::HeaderValue::from_str(&host).unwrap());
+        
         headers.insert(header::ACCEPT, header::HeaderValue::from_static("application/x-thrift"));
         headers.insert(header::CONTENT_TYPE, header::HeaderValue::from_static("application/x-thrift"));
         headers.insert(header::USER_AGENT, header::HeaderValue::from_str(&self.device_details.user_agent()).unwrap());
@@ -60,6 +53,7 @@ impl RequestClient {
         headers.insert("x-lal", header::HeaderValue::from_static("ja_JP"));
         headers.insert("x-lpv", header::HeaderValue::from_static("1"));
         headers.insert("x-lhm", header::HeaderValue::from_static("POST"));
+        headers.insert(header::ACCEPT_ENCODING, header::HeaderValue::from_static("gzip"));
 
         if let Some(token) = &self.auth_token {
             headers.insert("x-line-access", header::HeaderValue::from_str(token).unwrap());
@@ -78,6 +72,36 @@ impl RequestClient {
         }
 
         let res = req.send().await?;
+        println!("[DEBUG] Status: {}", res.status());
+        Ok(res)
+    }
+
+    // GET request with custom headers (used for email login PIN verification)
+    pub async fn get_with_headers(&self, path: &str, extra_headers: HashMap<String, String>, timeout: Option<std::time::Duration>) -> Result<Response, RequestError> {
+        let url = if self.endpoint.starts_with("http") {
+            format!("{}{}", self.endpoint, path)
+        } else {
+            format!("https://{}{}", self.endpoint, path)
+        };
+        let mut headers = header::HeaderMap::new();
+        
+        headers.insert(header::USER_AGENT, header::HeaderValue::from_str(&self.device_details.user_agent()).unwrap());
+        headers.insert("x-line-application", header::HeaderValue::from_str(&self.device_details.x_line_application()).unwrap());
+        headers.insert("x-lal", header::HeaderValue::from_static("ja_JP"));
+        headers.insert("x-lpv", header::HeaderValue::from_static("1"));
+        headers.insert("x-lhm", header::HeaderValue::from_static("GET"));
+        headers.insert(header::ACCEPT_ENCODING, header::HeaderValue::from_static("gzip"));
+
+        for (k, v) in extra_headers {
+            headers.insert(header::HeaderName::from_bytes(k.as_bytes()).unwrap(), header::HeaderValue::from_str(&v).unwrap());
+        }
+
+        let mut req = self.client.get(url).headers(headers);
+        if let Some(t) = timeout {
+            req = req.timeout(t);
+        }
+        let res = req.send().await?;
+        println!("[DEBUG] Status: {}", res.status());
         Ok(res)
     }
 }

@@ -11,7 +11,7 @@ import ssl
 import sys
 
 LINE_HOST = "legy.line-apps.com"
-LINE_PATHS = ["/S4", "/SYNC4", "/acct/"]
+LINE_PATHS = ["/S4", "/SYNC4", "/acct/", "/api/", "/Q", "/LF1"]
 
 PORT = 8080
 
@@ -24,10 +24,13 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
         '.json': 'application/json',
     }
 
-    def do_POST(self):
+    def proxy_request(self, method):
         # Check if this is a LINE API request
         is_line_api = any(self.path.startswith(p) for p in LINE_PATHS)
         if not is_line_api:
+            if method == 'GET':
+                 super().do_GET()
+                 return
             self.send_error(404, "Not Found")
             return
 
@@ -53,7 +56,7 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
                 target_url,
                 data=body,
                 headers=forward_headers,
-                method='POST'
+                method=method
             )
             with urllib.request.urlopen(req, timeout=200, context=ctx) as resp:
                 resp_body = resp.read()
@@ -64,6 +67,8 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(resp_body)
         except Exception as e:
+            with open("server_error.log", "a") as f:
+                f.write(f"Error proxying {self.path}: {e}\n")
             error_msg = str(e).encode()
             self.send_response(502)
             self.send_header('Content-Type', 'text/plain')
@@ -71,6 +76,16 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(error_msg)
+
+    def do_GET(self):
+        is_line_api = any(self.path.startswith(p) for p in LINE_PATHS)
+        if is_line_api:
+            self.proxy_request('GET')
+        else:
+            super().do_GET()
+
+    def do_POST(self):
+        self.proxy_request('POST')
 
     def do_OPTIONS(self):
         self.send_response(200)

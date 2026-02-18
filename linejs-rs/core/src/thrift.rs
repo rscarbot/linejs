@@ -36,6 +36,18 @@ impl TType {
         }
     }
 
+    pub fn from_binary(t: u8) -> Self {
+        match t {
+            0 => TType::Stop, 1 => TType::Void, 2 => TType::Bool, 3 => TType::Byte,
+            4 => TType::Double, 6 => TType::I16, 8 => TType::I32, 10 => TType::I64,
+            11 => TType::String, 12 => TType::Struct, 13 => TType::Map,
+            14 => TType::Set, 15 => TType::List,
+            _ => TType::Stop,
+        }
+    }
+
+    pub fn to_binary(&self) -> u8 { *self as u8 }
+
     pub fn to_compact(&self) -> u8 {
         match self {
             TType::Stop => 0x00,
@@ -289,7 +301,216 @@ impl<R: Read, W: Write> CompactProtocol<R, W> {
         Ok(())
     }
 
+    /// Write compact protocol list header: (size << 4 | elem_type) if size < 15,
+    /// else (0xF0 | elem_type) followed by varint size.
+    pub fn write_list_begin(&mut self, elem_type: TType, size: usize) -> Result<()> {
+        let type_bits = elem_type.to_compact();
+        if size < 15 {
+            self.write_byte(((size as u8) << 4) | type_bits)?;
+        } else {
+            self.write_byte(0xF0 | type_bits)?;
+            self.write_varint(size as u64)?;
+        }
+        Ok(())
+    }
+
     pub fn write_field_stop(&mut self) -> Result<()> { self.write_byte(0) }
     pub fn write_struct_begin(&mut self) -> Result<()> { self.field_id_stack.push(self.last_field_id); self.last_field_id = 0; Ok(()) }
     pub fn write_struct_end(&mut self) -> Result<()> { self.last_field_id = self.field_id_stack.pop().unwrap_or(0); Ok(()) }
+}
+
+// ── TBinaryProtocol ──────────────────────────────────────────────────
+
+pub struct BinaryProtocol<R: Read, W: Write> {
+    pub reader: Option<R>,
+    pub writer: Option<W>,
+}
+
+impl<R: Read, W: Write> BinaryProtocol<R, W> {
+    pub fn new(reader: Option<R>, writer: Option<W>) -> Self {
+        Self { reader, writer }
+    }
+
+    // ── Read helpers ────────────────────────────────────────────────
+
+    fn read_byte(&mut self) -> Result<u8> {
+        let mut b = [0u8; 1];
+        self.reader.as_mut().unwrap().read_exact(&mut b)?;
+        Ok(b[0])
+    }
+
+    fn read_i16_raw(&mut self) -> Result<i16> {
+        let mut buf = [0u8; 2];
+        self.reader.as_mut().unwrap().read_exact(&mut buf)?;
+        Ok(i16::from_be_bytes(buf))
+    }
+
+    pub fn read_i32(&mut self) -> Result<i32> {
+        let mut buf = [0u8; 4];
+        self.reader.as_mut().unwrap().read_exact(&mut buf)?;
+        Ok(i32::from_be_bytes(buf))
+    }
+
+    pub fn read_i64(&mut self) -> Result<i64> {
+        let mut buf = [0u8; 8];
+        self.reader.as_mut().unwrap().read_exact(&mut buf)?;
+        Ok(i64::from_be_bytes(buf))
+    }
+
+    pub fn read_string(&mut self) -> Result<String> {
+        let len = self.read_i32()? as usize;
+        if len == 0 { return Ok(String::new()); }
+        let mut buf = vec![0u8; len];
+        self.reader.as_mut().unwrap().read_exact(&mut buf)?;
+        match String::from_utf8(buf.clone()) {
+            Ok(s) => Ok(s),
+            Err(_) => Ok(general_purpose::STANDARD.encode(&buf)),
+        }
+    }
+
+    pub fn read_binary(&mut self) -> Result<Vec<u8>> {
+        let len = self.read_i32()? as usize;
+        let mut buf = vec![0u8; len];
+        self.reader.as_mut().unwrap().read_exact(&mut buf)?;
+        Ok(buf)
+    }
+
+    pub fn read_message_begin(&mut self) -> Result<(String, u8, i32)> {
+        let version = self.read_i32()?;
+        if (version & 0xffff0000u32 as i32) != 0x80010000u32 as i32 {
+            return Err(ThriftError::Protocol("Invalid binary protocol version".to_string()));
+        }
+        let msg_type = (version & 0x000000ff) as u8;
+        let name = self.read_string()?;
+        let seq_id = self.read_i32()?;
+        Ok((name, msg_type, seq_id))
+    }
+
+    pub fn read_field_begin(&mut self) -> Result<(TType, i16)> {
+        let type_byte = self.read_byte()?;
+        if type_byte == 0 { return Ok((TType::Stop, 0)); }
+        let field_id = self.read_i16_raw()?;
+        let ttype = TType::from_binary(type_byte);
+        Ok((ttype, field_id))
+    }
+
+    pub fn skip(&mut self, ttype: TType) -> Result<()> {
+        match ttype {
+            TType::Bool | TType::Byte => { self.read_byte()?; },
+            TType::I16 => { self.read_i16_raw()?; },
+            TType::I32 => { self.read_i32()?; },
+            TType::I64 => { self.read_i64()?; },
+            TType::Double => { let mut buf = [0u8; 8]; self.reader.as_mut().unwrap().read_exact(&mut buf)?; },
+            TType::String => { self.read_binary()?; },
+            TType::Struct => {
+                loop { let (ft, _) = self.read_field_begin()?; if ft == TType::Stop { break; } self.skip(ft)?; }
+            },
+            TType::Map => {
+                let kt = TType::from_binary(self.read_byte()?);
+                let vt = TType::from_binary(self.read_byte()?);
+                let size = self.read_i32()?;
+                for _ in 0..size { self.skip(kt)?; self.skip(vt)?; }
+            },
+            TType::Set | TType::List => {
+                let et = TType::from_binary(self.read_byte()?);
+                let size = self.read_i32()?;
+                for _ in 0..size { self.skip(et)?; }
+            },
+            _ => {},
+        }
+        Ok(())
+    }
+
+    pub fn read_value(&mut self, ttype: TType) -> Result<serde_json::Value> {
+        match ttype {
+            TType::Bool => Ok(serde_json::Value::Bool(self.read_byte()? != 0)),
+            TType::Byte => Ok(serde_json::Value::Number(self.read_byte()?.into())),
+            TType::I16 => Ok(serde_json::Value::Number(self.read_i16_raw()?.into())),
+            TType::I32 => Ok(serde_json::Value::Number(self.read_i32()?.into())),
+            TType::I64 => Ok(serde_json::Value::Number(self.read_i64()?.into())),
+            TType::Double => {
+                let mut buf = [0u8; 8]; self.reader.as_mut().unwrap().read_exact(&mut buf)?;
+                Ok(serde_json::json!(f64::from_be_bytes(buf)))
+            },
+            TType::String => {
+                let bin = self.read_binary()?;
+                if let Ok(s) = String::from_utf8(bin.clone()) { Ok(serde_json::Value::String(s)) }
+                else { Ok(serde_json::Value::String(general_purpose::STANDARD.encode(&bin))) }
+            },
+            TType::Struct => self.read_struct_to_value(),
+            TType::Map => {
+                let kt = TType::from_binary(self.read_byte()?);
+                let vt = TType::from_binary(self.read_byte()?);
+                let size = self.read_i32()?;
+                let mut map = serde_json::Map::new();
+                for _ in 0..size {
+                    let key_val = self.read_value(kt)?;
+                    let key_str = match key_val.as_str() {
+                        Some(s) => s.to_string(),
+                        None => key_val.to_string(),
+                    };
+                    map.insert(key_str, self.read_value(vt)?);
+                }
+                Ok(serde_json::Value::Object(map))
+            },
+            TType::List | TType::Set => {
+                let et = TType::from_binary(self.read_byte()?);
+                let size = self.read_i32()?;
+                let mut list = Vec::new();
+                for _ in 0..size { list.push(self.read_value(et)?); }
+                Ok(serde_json::Value::Array(list))
+            },
+            _ => Ok(serde_json::Value::Null),
+        }
+    }
+
+    pub fn read_struct_to_value(&mut self) -> Result<serde_json::Value> {
+        let mut map = serde_json::Map::new();
+        loop {
+            let (ttype, fid) = self.read_field_begin()?;
+            if ttype == TType::Stop { break; }
+            map.insert(fid.to_string(), self.read_value(ttype)?);
+        }
+        Ok(serde_json::Value::Object(map))
+    }
+
+    // ── Write helpers ───────────────────────────────────────────────
+
+    fn write_byte(&mut self, b: u8) -> Result<()> {
+        self.writer.as_mut().unwrap().write_all(&[b])?; Ok(())
+    }
+
+    pub fn write_i32(&mut self, n: i32) -> Result<()> {
+        self.writer.as_mut().unwrap().write_all(&n.to_be_bytes())?; Ok(())
+    }
+
+    pub fn write_string(&mut self, s: &str) -> Result<()> {
+        self.write_i32(s.len() as i32)?;
+        self.writer.as_mut().unwrap().write_all(s.as_bytes())?; Ok(())
+    }
+
+    pub fn write_binary(&mut self, data: &[u8]) -> Result<()> {
+        self.write_i32(data.len() as i32)?;
+        self.writer.as_mut().unwrap().write_all(data)?; Ok(())
+    }
+
+    pub fn write_bool(&mut self, value: bool) -> Result<()> {
+        self.write_byte(if value { 1 } else { 0 })
+    }
+
+    pub fn write_field_begin(&mut self, ttype: TType, id: i16) -> Result<()> {
+        self.write_byte(ttype.to_binary())?;
+        self.writer.as_mut().unwrap().write_all(&id.to_be_bytes())?;
+        Ok(())
+    }
+
+    pub fn write_field_stop(&mut self) -> Result<()> { self.write_byte(0) }
+
+    pub fn write_message_begin(&mut self, name: &str, message_type: u8, seq_id: i32) -> Result<()> {
+        let version = 0x80010000u32 as i32 | (message_type as i32);
+        self.write_i32(version)?;
+        self.write_string(name)?;
+        self.write_i32(seq_id)?;
+        Ok(())
+    }
 }

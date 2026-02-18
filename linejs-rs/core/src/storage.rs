@@ -45,6 +45,8 @@ pub struct Credential {
     pub qr_cert: Option<String>,
     pub mid: Option<String>,
     pub e2ee_key: Option<SavedE2EEKey>,
+    #[serde(default)]
+    pub display_names: std::collections::HashMap<String, String>,
 }
 
 impl Credential {

@@ -67,7 +67,7 @@ impl DeviceDetails {
 
     pub fn x_line_application(&self) -> String {
         format!(
-            "{}	{}	{}	{}",
+            "{}\t{}\t{}\t{}",
             self.device_type.as_str(),
             self.app_version,
             self.system_name,

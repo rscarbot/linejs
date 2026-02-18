@@ -6,42 +6,64 @@ use linejs_core::e2ee::{E2EE, E2EEKeyData};
 use linejs_core::storage::{Credential, SavedE2EEKey};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::collections::HashMap;
+use std::io::{Write, stdin};
 use tokio::time::sleep;
 use base64::Engine as _;
 
-const CREDENTIAL_PATH: &str = "linejs_credential.json";
+const CREDENTIAL_PATH: &str = "line_credential.json";
+
+fn get_credential_path() -> String {
+    if std::path::Path::new(CREDENTIAL_PATH).exists() {
+        CREDENTIAL_PATH.to_string()
+    } else {
+        // Try parent directory
+        let path = format!("../{}", CREDENTIAL_PATH);
+        if std::path::Path::new(&path).exists() {
+            path
+        } else {
+            CREDENTIAL_PATH.to_string()
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("--- LINEJS Rust iPad Login & Message Demo ---");
-
-    let device = DeviceDetails::new(DeviceType::IOSIPAD, Some("15.5.0".to_string()));
+    // Parse device mode from CLI args: `cargo run -- desktop` or `cargo run -- ipad` (default)
+    let args: Vec<String> = std::env::args().collect();
+    let mode = args.get(1).map(|s| s.as_str()).unwrap_or("ipad");
+    let device = match mode {
+        "desktop" | "pc" => {
+            println!("--- LINEJS Rust PC (Windows) Login & Message Demo ---");
+            DeviceDetails::new(DeviceType::DESKTOPWIN, None)
+        }
+        _ => {
+            println!("--- LINEJS Rust iPad Login & Message Demo ---");
+            DeviceDetails::new(DeviceType::IOSIPAD, Some("15.5.0".to_string()))
+        }
+    };
+    println!("Device mode: {} (usage: {} [ipad|desktop])", mode, args[0]);
 
     // Load saved credentials
-    let mut credential = Credential::load(CREDENTIAL_PATH);
-    println!("Credential file: {}", CREDENTIAL_PATH);
-    if credential.has_auth_token() {
-        println!("Found saved auth token, attempting token login...");
-    }
-    if credential.has_qr_cert() {
-        println!("Found saved QR certificate (PIN-less re-login available)");
-    }
+    let credential_path = get_credential_path();
+    let mut credential = Credential::load(&credential_path);
+    println!("Credential file: {}", credential_path);
 
     // Attempt token-based login if we have a saved auth token
     let (auth_token, self_key) = if credential.has_auth_token() {
+        println!("Found saved auth token, attempting token login...");
         match try_token_login(&device, &credential).await {
             Ok((token, key)) => {
                 println!("Token login successful!");
                 (token, key)
             }
             Err(e) => {
-                println!("Token login failed ({}), falling back to QR login...", e);
-                do_qr_login(&device, &mut credential).await?
+                println!("Token login failed ({}), starting manual login...", e);
+                select_login_method(&device, &mut credential, &credential_path).await?
             }
         }
     } else {
-        println!("No saved credentials, starting QR login...");
-        do_qr_login(&device, &mut credential).await?
+        println!("No saved credentials, starting manual login...");
+        select_login_method(&device, &mut credential, &credential_path).await?
     };
 
     // Set up authenticated service client for message polling
@@ -54,9 +76,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut peer_key_cache: HashMap<String, Vec<u8>> = HashMap::new();
     let my_mid = credential.mid.clone().unwrap_or_default();
 
+    // Cache MID -> displayName; restore from saved credentials
+    let mut display_name_cache: HashMap<String, String> = credential.display_names.clone();
+    if !display_name_cache.is_empty() {
+        println!("Restored {} display name mappings from credentials", display_name_cache.len());
+    }
+
+    // Fetch own display name via getProfile if not already cached
+    if !my_mid.is_empty() && !display_name_cache.contains_key(&my_mid) {
+        match talk_service.get_profile().await {
+            Ok(profile) => {
+                if let Some(name) = profile.get("3").and_then(|v| v.as_str()) {
+                    println!("Logged in as: {}", name);
+                    display_name_cache.insert(my_mid.clone(), name.to_string());
+                }
+            }
+            Err(e) => println!("Warning: Failed to fetch own profile: {}", e),
+        }
+    } else if let Some(name) = display_name_cache.get(&my_mid) {
+        println!("Logged in as: {}", name);
+    }
+
     println!("\nListening for messages... (Press Ctrl+C to stop)");
 
     // Poll for incoming messages via TalkService sync
+    let mut poll_count: u32 = 0;
     loop {
         match talk_service.sync(&mut sync_state).await {
             Ok(operations) => {
@@ -71,11 +115,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 msg, &self_key, &talk_service, &mut peer_key_cache, &my_mid
                             ).await;
                             let from = msg.get("1").and_then(|v| v.as_str()).unwrap_or("Unknown");
+                            let to = msg.get("2").and_then(|v| v.as_str()).unwrap_or("");
                             let epoch_secs = SystemTime::now()
                                 .duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
 
-                            println!("[{}] [{}]: {}", epoch_secs, from, text);
+                            // Resolve displayName for from and to MIDs
+                            let from_name = resolve_display_name(from, &talk_service, &mut display_name_cache).await;
+                            let to_name = resolve_display_name(to, &talk_service, &mut display_name_cache).await;
+
+                            println!("[{}] [{}->{}]: {}", epoch_secs, from_name, to_name, text);
                         }
+                    }
+                }
+
+                // Periodically save display name cache to credentials
+                poll_count += 1;
+                if poll_count % 10 == 0 {
+                    credential.display_names = display_name_cache.clone();
+                    if let Err(e) = credential.save(&credential_path) {
+                        println!("Warning: Failed to save credentials: {}", e);
                     }
                 }
             },
@@ -85,6 +143,180 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         sleep(Duration::from_millis(100)).await;
     }
+}
+
+async fn select_login_method(
+    device: &DeviceDetails,
+    credential: &mut Credential,
+    credential_path: &str,
+) -> Result<(String, Option<E2EEKeyData>), Box<dyn std::error::Error>> {
+    println!("\nSelect Login Method:");
+    println!("1. Email and Password");
+    println!("2. QR Code");
+    print!("Choose method [1]: ");
+    std::io::stdout().flush()?;
+
+    let mut input = String::new();
+    stdin().read_line(&mut input)?;
+    let choice = input.trim();
+
+    if choice == "2" {
+        do_qr_login(device, credential, credential_path).await
+    } else {
+        do_email_login(device, credential, credential_path).await
+    }
+}
+
+async fn do_email_login(
+    device: &DeviceDetails,
+    credential: &mut Credential,
+    credential_path: &str,
+) -> Result<(String, Option<E2EEKeyData>), Box<dyn std::error::Error>> {
+    let request_client = RequestClient::new(device.clone(), None);
+    let login = Login::new(request_client);
+
+    print!("Enter LINE Email: ");
+    std::io::stdout().flush()?;
+    let mut email = String::new();
+    stdin().read_line(&mut email)?;
+    let email = email.trim();
+
+    let password = rpassword::prompt_password("Enter LINE Password: ")?;
+
+    // Client-chosen random 6-digit PIN code for this login session
+    let constant_pincode = format!("{:06}", rand::random::<u32>() % 1_000_000);
+
+    // Generate E2EE secret for email login (matching TS createSqrSecret(true))
+    let (secret_key, secret_pk_b64) = E2EE::create_sqr_secret_raw();
+    let secret_pk_bytes = base64::engine::general_purpose::STANDARD.decode(&secret_pk_b64)?;
+
+    // e2eeData = AES-256-ECB(SHA256(pincode), publicKeyBytes)
+    // matching TS: encryptAESECB(getSHA256Sum(constantPincode), Buffer.from(secretPK, "base64"))
+    let pin_hash = E2EE::sha256_sum(&[constant_pincode.as_bytes()]);
+    let e2ee_data = E2EE::encrypt_aes_ecb(&pin_hash, &secret_pk_bytes)
+        .map_err(|e| format!("E2EE data encryption failed: {}", e))?;
+
+    println!("Connecting to LINE services...");
+    let (keynm, nvalue, evalue, session_key) = login.get_rsa_key_info().await?;
+    let encrypted_msg = Login::rsa_encrypt_credentials(&nvalue, &evalue, &session_key, email, &password)?;
+
+    // First loginZ with loginType=2 (E2EE, e2eeData in field 10)
+    let mut result = login.login_z(
+        &keynm, &encrypted_msg, device.device_type.as_str(),
+        None, None, Some(&e2ee_data),
+    ).await?;
+
+    let mut self_key: Option<E2EEKeyData> = None;
+
+    // PIN verification required?
+    if result.get("1").and_then(|v| v.as_str()).is_none() {
+        let verifier = result.get("3").and_then(|v| v.as_str())
+            .ok_or("No verifier found in login response")?;
+
+        // Display the CLIENT-CHOSEN pincode (not server-generated)
+        // Matching TS: this.client.emit("pincall", response.pinCode || constantPincode)
+        let display_pin = result.get("4")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&constant_pincode);
+
+        let sep = "=".repeat(40);
+        println!("\n{}", sep);
+        println!("PINCODE: {}", display_pin);
+        println!("Please enter this code on your smartphone LINE app.");
+        println!("{}\n", sep);
+
+        // E2EE path: poll /LF1 for E2EE metadata (matching TS requestEmailLogin with enableE2EE=true)
+        println!("Waiting for PIN verification (polling /LF1)...");
+        let e2ee_info = login.poll_email_e2ee_info(verifier).await?;
+
+        // Extract E2EE metadata from response
+        let metadata = e2ee_info.get("metadata")
+            .ok_or("No metadata in E2EE info response")?;
+
+        let encrypted_key_chain_b64 = metadata.get("encryptedKeyChain")
+            .and_then(|v| v.as_str())
+            .ok_or("No encryptedKeyChain in E2EE metadata")?;
+        let public_key_b64 = metadata.get("publicKey")
+            .and_then(|v| v.as_str())
+            .ok_or("No publicKey in E2EE metadata")?;
+        let key_id = metadata.get("keyId")
+            .and_then(|v| v.as_str())
+            .or_else(|| metadata.get("keyId").and_then(|v| v.as_i64()).map(|_| ""))
+            .unwrap_or("");
+        let e2ee_version = metadata.get("e2eeVersion")
+            .and_then(|v| v.as_str())
+            .unwrap_or("1");
+
+        println!("E2EE Metadata received: keyId={}, publicKey len={}, encryptedKeyChain len={}",
+            key_id, public_key_b64.len(), encrypted_key_chain_b64.len());
+
+        // Decode E2EE key from metadata (matching TS decodeE2EEKeyV1)
+        match E2EE::decode_e2ee_key_v1(
+            encrypted_key_chain_b64, public_key_b64, key_id, e2ee_version, &secret_key,
+        ) {
+            Ok(key_data) => {
+                println!("E2EE Key extracted: keyId={}", key_data.key_id);
+                self_key = Some(key_data);
+            }
+            Err(e) => println!("Warning: E2EE key decode failed: {}", e),
+        }
+
+        // Encrypt device secret (matching TS encryptDeviceSecret)
+        let server_pub_bytes = base64::engine::general_purpose::STANDARD.decode(public_key_b64)?;
+        let encrypted_key_chain_bytes = base64::engine::general_purpose::STANDARD.decode(encrypted_key_chain_b64)?;
+        let device_secret = E2EE::encrypt_device_secret(&server_pub_bytes, &secret_key, &encrypted_key_chain_bytes)
+            .map_err(|e| format!("Device secret encryption failed: {}", e))?;
+
+        // confirmE2EELogin → get new verifier
+        let new_verifier = login.confirm_e2ee_login(verifier, &device_secret).await?;
+        println!("E2EE login confirmed, completing authentication...");
+
+        let cert = result.get("2").and_then(|v| v.as_str());
+
+        // Final loginZ with verifier (loginType=1) + e2eeData
+        result = login.login_z(
+            &keynm, &encrypted_msg, device.device_type.as_str(),
+            cert, Some(&new_verifier), Some(&e2ee_data),
+        ).await?;
+    }
+
+    let auth_token = result.get("1").and_then(|v| v.as_str())
+        .ok_or("Auth token not found after login")?.to_string();
+
+    println!("Successfully logged in!");
+
+    // Extract MID from login response field "5"
+    let mid = result.get("5")
+        .or_else(|| result.get("0").and_then(|r| r.get("5")))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    if let Some(ref my_mid) = mid {
+        let mut temp_client = RequestClient::new(device.clone(), None);
+        temp_client.set_auth_token(auth_token.clone());
+        let talk_service = TalkService::new(temp_client);
+        if let Ok(profile) = talk_service.get_profile().await {
+            if let Some(name) = profile.get("3").and_then(|v| v.as_str()) {
+                println!("Logged in as: {} ({})", name, my_mid);
+                credential.display_names.insert(my_mid.clone(), name.to_string());
+            }
+        }
+    }
+
+    // Save credentials
+    credential.auth_token = Some(auth_token.clone());
+    credential.mid = mid;
+    if let Some(ref key) = self_key {
+        credential.e2ee_key = Some(SavedE2EEKey::from_key_data(key));
+        println!("E2EE key saved: keyId={}", key.key_id);
+    }
+
+    match credential.save(credential_path) {
+        Ok(()) => println!("Credentials saved to {}", credential_path),
+        Err(e) => println!("Warning: Failed to save credentials: {}", e),
+    }
+
+    Ok((auth_token, self_key))
 }
 
 /// Try to login using a saved auth token by setting it and testing with a sync call.
@@ -122,6 +354,7 @@ async fn try_token_login(
 async fn do_qr_login(
     device: &DeviceDetails,
     credential: &mut Credential,
+    credential_path: &str,
 ) -> Result<(String, Option<E2EEKeyData>), Box<dyn std::error::Error>> {
     let request_client = RequestClient::new(device.clone(), None);
     let login = Login::new(request_client);
@@ -234,13 +467,14 @@ async fn do_qr_login(
     if let Some(ref key) = self_key {
         credential.e2ee_key = Some(SavedE2EEKey::from_key_data(key));
     }
-    match credential.save(CREDENTIAL_PATH) {
-        Ok(()) => println!("Credentials saved to {}", CREDENTIAL_PATH),
+    match credential.save(credential_path) {
+        Ok(()) => println!("Credentials saved to {}", credential_path),
         Err(e) => println!("Warning: Failed to save credentials: {}", e),
     }
 
     Ok((auth_token, self_key))
 }
+
 
 // Extract E2EE self-key from the qrCodeLogin response using the SQR secret.
 // The login response contentMetadata is likely in field "4" (based on debug output).
@@ -408,6 +642,70 @@ async fn decrypt_message_text(
     }
 
     raw_text.to_string()
+}
+
+// Resolve a MID to its displayName, with caching.
+// MIDs starting with 'c' are chat/group MIDs → use getChats (Chat field 6 = chatName).
+// Other MIDs are user MIDs → use getContact (Contact field 22 = displayName, 27 = overridden).
+async fn resolve_display_name(
+    mid: &str,
+    talk_service: &TalkService,
+    cache: &mut HashMap<String, String>,
+) -> String {
+    if mid.is_empty() {
+        return String::new();
+    }
+    if let Some(name) = cache.get(mid) {
+        return name.clone();
+    }
+
+    if mid.starts_with('c') {
+        // Chat/group MID → use getChats to get chatName
+        match talk_service.get_chats(&[mid]).await {
+            Ok(resp) => {
+                // GetChatsResponse field 1 = chats (list of Chat)
+                // Chat field 6 = chatName
+                if let Some(chats) = resp.get("1").and_then(|v| v.as_array()) {
+                    if let Some(chat) = chats.first() {
+                        let name = chat.get("6")
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or(mid)
+                            .to_string();
+                        cache.insert(mid.to_string(), name.clone());
+                        return name;
+                    }
+                }
+                cache.insert(mid.to_string(), mid.to_string());
+                mid.to_string()
+            }
+            Err(e) => {
+                println!("Warning: Failed to resolve chatName for {}: {}", mid, e);
+                cache.insert(mid.to_string(), mid.to_string());
+                mid.to_string()
+            }
+        }
+    } else {
+        // User MID → use getContact
+        match talk_service.get_contact(mid).await {
+            Ok(contact) => {
+                // Prefer displayNameOverridden (field 27) if set, otherwise displayName (field 22)
+                let name = contact.get("27")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| contact.get("22").and_then(|v| v.as_str()))
+                    .unwrap_or(mid)
+                    .to_string();
+                cache.insert(mid.to_string(), name.clone());
+                name
+            }
+            Err(e) => {
+                println!("Warning: Failed to resolve displayName for {}: {}", mid, e);
+                cache.insert(mid.to_string(), mid.to_string());
+                mid.to_string()
+            }
+        }
+    }
 }
 
 // Get peer's E2EE public key, using cache or calling negotiateE2EEPublicKey

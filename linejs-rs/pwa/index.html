@@ -5,18 +5,18 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="theme-color" content="#06C755">
-  <meta name="description" content="LINE Messaging Client powered by Rust + WebAssembly">
+  <meta name="description" content="Driver Messaging Client">
   <link rel="manifest" href="manifest.json">
   <link rel="icon"
     href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💬</text></svg>">
-  <title>LINE for Driver</title>
+  <title>Dispatcher Messenger</title>
   <link rel="stylesheet" href="style.css">
 </head>
 
 <body>
   <div class="header">
     <span style="font-size: 22px;">💬</span>
-    <h1>LINE for Driver</h1>
+    <h1>Dispatcher Messenger</h1>
     <div class="status-dot" id="status-dot"></div>
     <button id="btn-logout" onclick="doLogout()"
       style="display:none; background:none; border:none; color:white; font-size:20px; cursor:pointer; margin-left:8px;"
@@ -27,9 +27,9 @@
     <!-- Login Screen -->
     <div class="screen active" id="login-screen">
       <div class="login-logo">🔐</div>
-      <div class="login-title">LINE Messenger</div>
+      <div class="login-title">Dispatcher Messenger</div>
       <div class="login-desc">
-        End-to-end encrypted messaging powered by Rust and WebAssembly.
+        End-to-end encrypted messaging.
         Login with your LINE account via QR code.
       </div>
 
@@ -44,7 +44,7 @@
       </div>
 
       <button class="btn btn-primary" id="btn-login" onclick="startLogin()">
-        Login with QR Code
+        Apply
       </button>
     </div>
 
@@ -53,14 +53,95 @@
       <div class="qr-label">Scan QR Code</div>
       <div class="qr-sublabel">Open LINE on your phone and scan this code</div>
       <div class="qr-container">
-        <img id="qr-image" alt="QR Code" />
+        <a id="qr-link" href="#" target="_blank" rel="noopener" style="display:inline-block; cursor:pointer;">
+          <img id="qr-image" alt="QR Code" />
+        </a>
+        <div id="qr-timeout-overlay" class="qr-timeout-overlay" style="display: none;" onclick="retryQrLogin()">
+          <div class="refresh-btn">
+            <svg viewBox="0 0 24 24">
+              <path
+                d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z" />
+            </svg>
+          </div>
+          <div style="font-size: 14px; font-weight: 600; color: #333; margin-top: 12px;">Tap to reload</div>
+        </div>
+        <div style="font-size:12px; color:var(--text-muted); margin-top:8px;">Tap QR code to open login link</div>
       </div>
       <div class="spinner" id="qr-spinner" style="display:none;"></div>
       <div class="qr-sublabel" id="qr-status">Waiting for scan...</div>
-      <button class="btn btn-secondary" onclick="cancelLogin()" style="margin-top: 10px;">
+      <button class="btn btn-secondary" onclick="switchToEmail()" style="margin-top: 10px;">
+        ✉️ Login with Email
+      </button>
+      <button class="btn btn-secondary" onclick="cancelLogin()" style="margin-top: 6px;">
         <img src="cancel.png" alt="Cancel" width="18" height="18" style="vertical-align: middle;">
         Cancel
       </button>
+    </div>
+
+    <!-- Email Login Screen -->
+    <div class="screen" id="email-screen">
+      <!-- Deprecated: Kept for fallback if needed, but UI now uses combined-screen -->
+    </div>
+
+    <!-- Combined Login Screen -->
+    <div class="screen" id="combined-screen">
+      <div class="login-split-container">
+        <!-- Left Section: Email Login -->
+        <div class="login-section email-section">
+          <div class="line-logo">LINE</div>
+          <div class="input-group">
+            <input type="email" id="email-input-combined" placeholder="Email address"
+              oninput="checkCombinedLoginInputs()" />
+            <input type="password" id="password-input-combined" placeholder="Password"
+              oninput="checkCombinedLoginInputs()" />
+          </div>
+          <button class="btn btn-login-full" id="btn-email-login-combined" onclick="startEmailLoginCombined()" disabled>
+            Login
+          </button>
+        </div>
+
+        <!-- Vertical Divider -->
+        <div class="vertical-divider"></div>
+
+        <!-- Right Section: QR Code -->
+        <div class="login-section qr-section">
+          <div class="qr-container">
+            <a id="qr-link-combined" href="#" target="_blank" rel="noopener"
+              style="display:inline-block; cursor:pointer;">
+              <img id="qr-image-combined" alt="QR Code" />
+            </a>
+            <div id="qr-timeout-overlay-combined" class="qr-timeout-overlay" style="display: none;"
+              onclick="retryQrLogin()">
+              <div class="refresh-btn">
+                <svg viewBox="0 0 24 24">
+                  <path
+                    d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z" />
+                </svg>
+              </div>
+              <div style="font-size: 14px; font-weight: 600; color: #333; margin-top: 12px;">Tap to reload</div>
+            </div>
+          </div>
+          <div class="spinner" id="qr-spinner-combined" style="display:none;"></div>
+
+          <div class="qr-label" style="margin-top: 15px; font-size: 16px; font-weight: bold;">Login with QR Code</div>
+
+          <div class="qr-sublabel" id="qr-status-combined"
+            style="text-align: center; max-width: 200px; line-height: 1.5; color: #666;">
+            Open LINE on your phone and scan this code
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Email PIN Screen -->
+    <div class="screen" id="email-pin-screen">
+      <div style="font-size: 40px;">📱</div>
+      <div class="qr-label">Enter PIN Code</div>
+      <div class="qr-sublabel">Enter this code on your mobile device to confirm</div>
+      <div class="pin-display" id="email-pin-display">------</div>
+      <div class="spinner" id="email-pin-spinner"></div>
+      <div class="qr-sublabel" id="email-pin-status">Waiting for verification...</div>
+      <button class="btn btn-secondary" onclick="cancelPinLogin()" style="margin-top: 20px;">Cancel</button>
     </div>
 
     <!-- PIN Screen -->
@@ -71,6 +152,7 @@
       <div class="pin-display" id="pin-display">------</div>
       <div class="spinner" id="pin-spinner"></div>
       <div class="qr-sublabel" id="pin-status">Waiting for verification...</div>
+      <button class="btn btn-secondary" onclick="cancelPinLogin()" style="margin-top: 20px;">Cancel</button>
     </div>
 
     <!-- Chat Screen -->
@@ -92,19 +174,42 @@
     let client = null;
     let pollInterval = null;
     let loginGen = 0; // Generation counter to stop old polls
+    let msgPollGen = 0; // Generation counter for message polling
 
     // Expose functions to global scope for onclick handlers
     window.startLogin = startLogin;
     window.toggleLog = toggleLog;
     window.doLogout = doLogout;
     window.cancelLogin = cancelLogin;
+    window.cancelPinLogin = cancelPinLogin;
+
+    // Combined Login Functions
+    window.startEmailLoginCombined = startEmailLoginCombined;
+    window.checkCombinedLoginInputs = checkCombinedLoginInputs;
+    window.retryQrLogin = retryQrLogin;
+    window.showQrTimeout = showQrTimeout;
+
+    function checkCombinedLoginInputs() {
+      const email = document.getElementById('email-input-combined').value.trim();
+      const password = document.getElementById('password-input-combined').value;
+      const btn = document.getElementById('btn-email-login-combined');
+      if (email && password) {
+        btn.disabled = false;
+        btn.classList.add('active');
+        btn.style.background = '#06C755';
+      } else {
+        btn.disabled = true;
+        btn.classList.remove('active');
+        btn.style.background = '#c3c3c3';
+      }
+    }
 
     function doLogout() {
       localStorage.removeItem('line_credentials');
       setOnline(false);
       document.getElementById('btn-logout').style.display = 'none';
       document.getElementById('btn-login').disabled = false;
-      document.getElementById('btn-login').textContent = 'Login with QR Code';
+      document.getElementById('btn-login').textContent = 'Apply';
       document.getElementById('messages-container').innerHTML = '<div class="message system">Waiting for messages...</div>';
       showScreen('login-screen');
       setStatus('Logged out. Ready to login');
@@ -115,13 +220,14 @@
       }
       client = new LineClient();
       loginGen++;
+      msgPollGen++; // Stop any existing message polling
     }
 
     function cancelLogin() {
       log('Login cancelled by user');
       showScreen('login-screen');
       document.getElementById('btn-login').disabled = false;
-      document.getElementById('btn-login').textContent = 'Login with QR Code';
+      document.getElementById('btn-login').textContent = 'Apply';
       setStatus('Login cancelled. Ready to login');
       // Re-create client to clear login state
       if (client) {
@@ -129,6 +235,151 @@
       }
       client = new LineClient();
       loginGen++;
+    }
+
+    function cancelPinLogin() {
+      // Reuse cancelLogin logic to return to main screen and reset state
+      // This avoids the network call of startLogin() which can hang or fail
+      cancelLogin();
+    }
+
+    function switchToEmail() {
+      // Cancel QR polling by bumping loginGen
+      loginGen++;
+      showScreen('email-screen');
+      setStatus('Enter your email and password');
+      log('Switched to email login');
+
+      // Reset inputs
+      document.getElementById('email-input').value = '';
+      document.getElementById('password-input').value = '';
+      checkLoginInputs();
+    }
+
+    function switchToQr() {
+      // Go back to login screen so user can start QR flow fresh
+      loginGen++;
+      showScreen('login-screen');
+      document.getElementById('btn-login').disabled = false;
+      document.getElementById('btn-login').textContent = 'Apply';
+      setStatus('Ready to login');
+      log('Switched back to QR login');
+      // Re-create client to clear email login state
+      if (client) {
+        try { client.free(); } catch (e) { }
+      }
+      client = new LineClient();
+    }
+
+    async function startEmailLoginCombined() {
+      const email = document.getElementById('email-input-combined').value.trim();
+      const password = document.getElementById('password-input-combined').value;
+      if (!email || !password) {
+        log('Please enter both email and password', 'error');
+        return;
+      }
+
+      const btn = document.getElementById('btn-email-login-combined');
+      btn.disabled = true;
+      btn.textContent = 'Logging in...';
+      setStatus('Authenticating with Email...');
+      log('Starting email login...');
+
+      // Re-create client to get fresh state (this will kill the QR polling because of client replacement)
+      if (client) {
+        // Note: We don't implicitly stop QR polling here via loginGen until we actually make a new client
+        // But creating new client invalidates the old one. We should bump loginGen to be safe.
+        try { client.free(); } catch (e) { }
+      }
+      loginGen++; // Stop the background QR poll
+
+      client = new LineClient();
+
+      const deviceMode = document.getElementById('device-mode').value;
+      if (client.setDevice) {
+        client.setDevice(deviceMode);
+      }
+
+      try {
+        const resultStr = await client.emailLoginStart(email, password);
+        const result = JSON.parse(resultStr);
+
+        if (result.authToken) {
+          // Direct success (certificate was present, no PIN needed)
+          log('Email login successful!', 'success');
+          const creds = client.exportCredentials();
+          if (creds) {
+            localStorage.setItem(CRED_KEY, creds);
+            log('Credentials saved', 'success');
+          }
+          setStatus('Logged in - Listening for messages');
+          setOnline(true);
+          document.getElementById('btn-logout').style.display = '';
+          showScreen('chat-screen');
+          addSystemMessage('Connected! Listening for messages...');
+          showScreen('chat-screen');
+          addSystemMessage('Connected! Listening for messages...');
+          startMessagePolling(++msgPollGen);
+        } else if (result.pinCode) {
+          // PIN verification required
+          log('PIN required: ' + result.pinCode, 'success');
+          showScreen('email-pin-screen');
+          document.getElementById('email-pin-display').textContent = result.pinCode;
+          setStatus('Enter PIN on your mobile device');
+          setStatus('Enter PIN on your mobile device');
+          pollEmailPinVerification(loginGen);
+        }
+      } catch (e) {
+        log('Email login error: ' + e, 'error');
+        setStatus('Login failed: ' + e);
+        // If failed, we might want to restart the whole flow or just let them try email again.
+        // For simplicity, let them try email again. But QR is dead now.
+        // Ideally we should restart QR too, but that requires re-init.
+        // Let's just reset the button.
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Login';
+        // If login failed, QR is dead. Maybe we should warn user or redirect back to Apply?
+        // For now, just leave as is. User can hit Cancel to restart.
+      }
+    }
+
+    async function pollEmailPinVerification(gen) {
+      if (gen !== loginGen) return;
+
+      log('Waiting for email PIN verification...');
+      try {
+        const resultStr = await client.emailLoginCheckPin();
+        if (gen !== loginGen) return;
+        const result = JSON.parse(resultStr);
+
+        if (result.authToken) {
+          log('Email login completed!', 'success');
+          document.getElementById('email-pin-status').textContent = 'Verified!';
+
+          const creds = client.exportCredentials();
+          if (creds) {
+            localStorage.setItem(CRED_KEY, creds);
+            log('Credentials saved', 'success');
+          }
+
+          setStatus('Logged in - Listening for messages');
+          setOnline(true);
+          document.getElementById('btn-logout').style.display = '';
+          showScreen('chat-screen');
+          addSystemMessage('Connected! Listening for messages...');
+          showScreen('chat-screen');
+          addSystemMessage('Connected! Listening for messages...');
+          startMessagePolling(++msgPollGen);
+        } else {
+          log('PIN verification returned no token, retrying...', 'warn');
+          pollEmailPinVerification(gen);
+        }
+      } catch (e) {
+        log('Email PIN verification error: ' + e, 'error');
+        document.getElementById('email-pin-status').textContent = 'Verification failed: ' + e;
+        setStatus('PIN verification failed');
+      }
     }
 
     function log(msg, type = '') {
@@ -196,7 +447,8 @@
             document.getElementById('btn-logout').style.display = '';
             showScreen('chat-screen');
             addSystemMessage('Session restored. Listening for messages...');
-            startMessagePolling();
+            addSystemMessage('Session restored. Listening for messages...');
+            startMessagePolling(++msgPollGen);
             return;
           } catch (e) {
             log('Auto-login failed (token may be expired): ' + e, 'error');
@@ -226,8 +478,8 @@
       const btn = document.getElementById('btn-login');
       btn.disabled = true;
       btn.textContent = 'Connecting...';
-      setStatus('Creating login session...');
-      log('Starting QR login flow...');
+      setStatus('Creating login session (QR & Email)...');
+      log('Starting combined login flow...');
 
       const currentGen = ++loginGen;
 
@@ -242,18 +494,75 @@
         const result = JSON.parse(resultStr);
         log('QR code generated', 'success');
 
-        // Show QR screen
-        showScreen('qr-screen');
-        document.getElementById('qr-image').src = result.qrImageUrl;
-        setStatus('Scan the QR code with LINE app');
+        // Show Combined screen
+        showScreen('combined-screen');
+
+        // Update QR image in combined screen
+        document.getElementById('qr-image-combined').src = result.qrImageUrl;
+        document.getElementById('qr-link-combined').href = result.url;
+
+        // Ensure email inputs are cleared or ready
+        document.getElementById('email-input-combined').value = '';
+        document.getElementById('password-input-combined').value = '';
+        checkCombinedLoginInputs();
+
+        setStatus('Scan QR code OR enter Email/Password');
 
         // Poll for QR verification
         pollQrVerification(currentGen);
       } catch (e) {
         log('Login error: ' + e, 'error');
+        // If error specifically mentions timeout (which it might not in create phase), just fail
+        // But if createQrLogin failing is different, we handle it here.
         setStatus('Login failed: ' + e);
         btn.disabled = false;
-        btn.textContent = 'Login with QR Code';
+        btn.textContent = 'Apply';
+      }
+    }
+
+    function retryQrLogin() {
+      // Hide overlays
+      document.getElementById('qr-timeout-overlay').style.display = 'none';
+      document.getElementById('qr-timeout-overlay-combined').style.display = 'none';
+
+      // Reset status text style (red -> normal)
+      const status = document.getElementById('qr-status');
+      if (status) {
+        status.textContent = 'Waiting for scan...';
+        status.style.color = '';
+      }
+
+      const combinedStatusEl = document.getElementById('qr-status-combined');
+      if (combinedStatusEl) {
+        // Reset to initial helpful text or waiting text
+        combinedStatusEl.textContent = 'Open LINE on your phone and scan this code';
+        combinedStatusEl.style.color = '#666'; // Reset color explicitly or empty
+        combinedStatusEl.style.color = '';
+      }
+
+      // Restart login flow
+      startLogin();
+    }
+
+    function showQrTimeout() {
+      log('QR login timed out', 'warn');
+      // Show overlays
+      document.getElementById('qr-timeout-overlay').style.display = 'flex';
+      document.getElementById('qr-timeout-overlay-combined').style.display = 'flex';
+
+      // Update status text
+      const timeoutMsg = 'Action required: Tap to regenerate QR Code';
+
+      const statusEl = document.getElementById('qr-status');
+      if (statusEl) {
+        statusEl.textContent = timeoutMsg;
+        statusEl.style.color = 'var(--danger)';
+      }
+
+      const combinedStatusEl = document.getElementById('qr-status-combined');
+      if (combinedStatusEl) {
+        combinedStatusEl.textContent = timeoutMsg;
+        combinedStatusEl.style.color = 'var(--danger)';
       }
     }
 
@@ -261,25 +570,26 @@
       if (gen !== loginGen) return; // Stop if new login started
 
       log('Waiting for QR scan...');
-      document.getElementById('qr-status').textContent = 'Waiting for scan...';
+      document.getElementById('qr-status-combined').textContent = 'Waiting for scan...';
 
       try {
         const verified = await client.checkQrCodeVerified();
+        if (gen !== loginGen) return;
+
         if (verified) {
           log('QR code scanned!', 'success');
-          document.getElementById('qr-status').textContent = 'Scanned!';
+          document.getElementById('qr-status-combined').textContent = 'Scanned!';
           setStatus('QR code scanned, verifying...');
           await handlePostScan();
         } else {
-          log('QR poll timeout, retrying...');
-          // Retry
-          if (gen === loginGen) {
-            pollQrVerification(gen);
-          }
+          // FALSE means timed out (180s expired without scan)
+          // Show timeout UI instead of retrying
+          showQrTimeout();
         }
       } catch (e) {
         log('QR verification error: ' + e, 'error');
-        setStatus('QR verification error');
+        // Network error? Maybe retry with backoff, but simplistic: show error/timeout UI
+        showQrTimeout();
       }
     }
 
@@ -304,24 +614,30 @@
         document.getElementById('pin-display').textContent = pin;
         setStatus('Enter PIN on your mobile device');
 
-        pollPinVerification();
+        setStatus('Enter PIN on your mobile device');
+
+        pollPinVerification(loginGen);
       } catch (e) {
         log('PIN creation error: ' + e, 'error');
         setStatus('PIN creation failed');
       }
     }
 
-    async function pollPinVerification() {
+    async function pollPinVerification(gen) {
+      if (gen !== loginGen) return;
+
       log('Waiting for PIN verification...');
       try {
         const verified = await client.checkPinCodeVerified();
+        if (gen !== loginGen) return;
+
         if (verified) {
           log('PIN verified!', 'success');
           setStatus('PIN verified, logging in...');
           await completeLogin();
         } else {
           log('PIN poll timeout, retrying...');
-          pollPinVerification();
+          pollPinVerification(gen);
         }
       } catch (e) {
         log('PIN verification error: ' + e, 'error');
@@ -349,18 +665,23 @@
         addSystemMessage('Connected! Listening for messages...');
 
         // Start message polling
-        startMessagePolling();
+        // Start message polling
+        startMessagePolling(++msgPollGen);
       } catch (e) {
         log('Login completion error: ' + e, 'error');
         setStatus('Login failed: ' + e);
       }
     }
 
-    function startMessagePolling() {
+    function startMessagePolling(gen) {
+      if (gen !== msgPollGen) return;
+
       let pollCount = 0;
       let backoff = 200;
 
       async function poll() {
+        if (gen !== msgPollGen) return; // Stop if invalidated
+
         try {
           const resultStr = await client.pollMessages();
           const messages = JSON.parse(resultStr);
@@ -397,7 +718,7 @@
             setOnline(false);
             document.getElementById('btn-logout').style.display = 'none';
             document.getElementById('btn-login').disabled = false;
-            document.getElementById('btn-login').textContent = 'Login with QR Code';
+            document.getElementById('btn-login').textContent = 'Apply';
             showScreen('login-screen');
             setStatus('Session expired. Please login again');
             addSystemMessage('Session expired. Please login again.');

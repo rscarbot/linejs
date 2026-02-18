@@ -30,6 +30,46 @@ impl E2EE {
         (secret_key, format!("?secret={}&e2eeVersion=1", secret_param))
     }
 
+    // Generate X25519 keypair for email E2EE login.
+    // Returns (secret_key_bytes, public_key_base64) matching TS createSqrSecret(true).
+    pub fn create_sqr_secret_raw() -> (Vec<u8>, String) {
+        let secret_key = StaticSecret::random_from_rng(OsRng);
+        let public_key = PublicKey::from(&secret_key);
+        let pub_key_base64 = general_purpose::STANDARD.encode(public_key.as_bytes());
+        (secret_key.as_bytes().to_vec(), pub_key_base64)
+    }
+
+    // AES-256-ECB encrypt with no padding (matching TS encryptAESECB).
+    // Key must be 32 bytes, data must be a multiple of 16 bytes.
+    pub fn encrypt_aes_ecb(key: &[u8], data: &[u8]) -> Result<Vec<u8>, String> {
+        use aes::cipher::{BlockEncrypt, generic_array::GenericArray};
+        if data.len() % 16 != 0 {
+            return Err(format!("AES-ECB: data length {} not multiple of 16", data.len()));
+        }
+        let cipher = aes::Aes256::new_from_slice(key)
+            .map_err(|e| format!("AES-ECB key init: {}", e))?;
+        let mut result = data.to_vec();
+        for chunk in result.chunks_mut(16) {
+            let block = GenericArray::from_mut_slice(chunk);
+            cipher.encrypt_block(block);
+        }
+        Ok(result)
+    }
+
+    // Encrypt device secret for confirmE2EELogin (matching TS encryptDeviceSecret).
+    // Arguments: server_public_key (raw bytes), secret_key (raw bytes), encrypted_key_chain (raw bytes).
+    pub fn encrypt_device_secret(
+        server_public_key: &[u8],
+        secret_key: &[u8],
+        encrypted_key_chain: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let shared_secret = Self::generate_shared_secret(secret_key, server_public_key);
+        let aes_key = Self::sha256_sum(&[&shared_secret, b"Key"]);
+        let chain_hash = Self::sha256_sum(&[encrypted_key_chain]);
+        let xored = Self::xor(&chain_hash); // 16 bytes
+        Self::encrypt_aes_ecb(&aes_key, &xored)
+    }
+
     // SHA-256 hash of concatenated byte slices
     pub fn sha256_sum(data: &[&[u8]]) -> Vec<u8> {
         let mut hasher = Sha256::new();
