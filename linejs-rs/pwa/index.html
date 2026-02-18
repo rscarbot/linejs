@@ -160,6 +160,11 @@
       <div class="messages-container" id="messages-container">
         <div class="message system">Waiting for messages...</div>
       </div>
+      <div class="scroll-bottom-btn" id="scroll-bottom-btn" onclick="scrollToBottom()">
+        <svg viewBox="0 0 24 24">
+          <path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z" />
+        </svg>
+      </div>
     </div>
   </div>
 
@@ -182,6 +187,24 @@
     window.doLogout = doLogout;
     window.cancelLogin = cancelLogin;
     window.cancelPinLogin = cancelPinLogin;
+    window.scrollToBottom = scrollToBottom;
+
+    // Initialize scroll listener
+    (function initScrollListener() {
+      const container = document.getElementById('messages-container');
+      const btn = document.getElementById('scroll-bottom-btn');
+      if (container && btn) {
+        container.addEventListener('scroll', () => {
+          const threshold = 200;
+          const distToBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+          if (distToBottom > threshold) {
+            btn.classList.add('visible');
+          } else {
+            btn.classList.remove('visible');
+          }
+        });
+      }
+    })();
 
     // Combined Login Functions
     window.startEmailLoginCombined = startEmailLoginCombined;
@@ -739,6 +762,11 @@
 
     function isAtBottom(container) {
       return container.scrollHeight - container.scrollTop - container.clientHeight < 50;
+    }
+
+    function scrollToBottom() {
+      const container = document.getElementById('messages-container');
+      container.scrollTop = container.scrollHeight;
     }
 
     function addSystemMessage(text) {
